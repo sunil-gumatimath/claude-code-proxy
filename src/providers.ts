@@ -13,13 +13,16 @@ export interface ModelCapabilities {
 }
 
 const CAPABILITIES: Record<string, ModelCapabilities> = {
+  "opencode/deepseek-v4-flash": { tools: true, vision: false },
   "opencode/deepseek-v4-flash-free": { tools: true, vision: false },
-  "opencode/big-pickle": { tools: true, vision: false },
+  "opencode/ling-3.0-flash-free": { tools: true, vision: false },
   "opencode/mimo-v2.5-free": { tools: true, vision: false },
   "opencode/north-mini-code-free": { tools: true, vision: false },
   "opencode/nemotron-3-ultra-free": { tools: true, vision: false },
+  "opencode/laguna-s-2.1-free": { tools: true, vision: false },
+  "opencode/longcat-2.0-free": { tools: true, vision: false },
   "kilo/stepfun/step-3.7-flash:free": { tools: true, vision: true },
-  "kilo/poolside/laguna-m.1:free": { tools: true, vision: false },
+  "kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false },
   "kilo/cohere/north-mini-code:free": { tools: true, vision: false },
 };
 
@@ -49,8 +52,13 @@ export function getProvider(config: Config, provider: ProviderName) {
   };
 }
 
-export function providerEnabled(config: Config, provider: ProviderName): boolean {
-  return Boolean(getProvider(config, provider).apiKey);
+/** A provider is enabled when a key exists in config OR arrives with the request. */
+export function providerEnabled(
+  config: Config,
+  provider: ProviderName,
+  requestApiKey = "",
+): boolean {
+  return Boolean(getProvider(config, provider).apiKey || requestApiKey);
 }
 
 export function displayTarget(target: UpstreamTarget): string {
@@ -59,8 +67,20 @@ export function displayTarget(target: UpstreamTarget): string {
 
 export function isFreeTarget(target: UpstreamTarget): boolean {
   return target.provider === "opencode"
-    ? target.model.endsWith("-free") || target.model === "big-pickle"
+    ? target.model.endsWith("-free")
     : target.model.endsWith(":free") || target.model === "kilo-auto/free";
+}
+
+/**
+ * Apply the gateway model prefix (MODEL_PREFIX) to a kilo target. OpenCode Zen
+ * models are never prefixed. Prefixing lives here — the single place the
+ * upstream model name is decided — so translateRequest stays prefix-free.
+ */
+export function qualifyModel(target: UpstreamTarget, config: Config): string {
+  if (target.provider !== "kilo" || !config.modelPrefix) return target.model;
+  return target.model.startsWith(config.modelPrefix)
+    ? target.model
+    : config.modelPrefix + target.model;
 }
 
 export function getCapabilities(target: UpstreamTarget): ModelCapabilities {

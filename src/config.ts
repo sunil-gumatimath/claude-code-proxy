@@ -73,17 +73,17 @@ export function loadConfig(): Config {
     modelPrefix: Bun.env.MODEL_PREFIX ?? "",
     defaultModel: envStr("DEFAULT_MODEL", "claude-sonnet-4-20250514"),
     fallbackModels: (Bun.env.FALLBACK_MODELS ??
-      "kilo/poolside/laguna-m.1:free,kilo/cohere/north-mini-code:free,kilo/stepfun/step-3.7-flash:free,opencode/big-pickle,opencode/deepseek-v4-flash-free")
+      "kilo/poolside/laguna-s-2.1:free,kilo/cohere/north-mini-code:free,kilo/stepfun/step-3.7-flash:free,opencode/deepseek-v4-flash-free,opencode/longcat-2.0-free,opencode/laguna-s-2.1-free")
       .split(",")
       .map((model) => model.trim())
       .filter(Boolean),
     allowedModels: (Bun.env.ALLOWED_MODELS ??
-      "opencode/deepseek-v4-flash-free,opencode/big-pickle,opencode/mimo-v2.5-free,opencode/north-mini-code-free,opencode/nemotron-3-ultra-free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-m.1:free,kilo/cohere/north-mini-code:free")
+      "opencode/deepseek-v4-flash-free,opencode/ling-3.0-flash-free,opencode/mimo-v2.5-free,opencode/north-mini-code-free,opencode/nemotron-3-ultra-free,opencode/laguna-s-2.1-free,opencode/longcat-2.0-free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/cohere/north-mini-code:free")
       .split(",").map((model) => model.trim()).filter(Boolean),
     freeModelsOnly: envBool("FREE_MODELS_ONLY", true),
     modelAliases: parseAliases(
       Bun.env.MODEL_ALIASES ??
-        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=opencode/deepseek-v4-flash-free,*opus*=kilo/poolside/laguna-m.1:free"
+        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=opencode/deepseek-v4-flash-free,*opus*=kilo/poolside/laguna-s-2.1:free"
     ),
     smartRouting: envBool("SMART_ROUTING", true),
     maxConcurrentRequests: envInt("MAX_CONCURRENT_REQUESTS", 4),
