@@ -4,7 +4,7 @@
 
 import type { Config } from "./config";
 import { anthropicError } from "./errors";
-import { handleMessages } from "./handlers/messages";
+import { handleCountTokens, handleMessages } from "./handlers/messages";
 import { colors, banner, log, setDebug } from "./log";
 import { getMetrics, prometheusMetrics } from "./runtime";
 import { NAME, VERSION } from "./version";
@@ -97,6 +97,13 @@ export function createServer(config: Config) {
 
       if (req.method === "GET" && url.pathname === "/dashboard.json") {
         return Response.json(getMetrics(), { headers: { "Cache-Control": "no-store" } });
+      }
+
+      if (
+        req.method === "POST" &&
+        url.pathname === "/v1/messages/count_tokens"
+      ) {
+        return handleCountTokens(req, config);
       }
 
       if (req.method === "POST" && url.pathname === "/v1/messages") {

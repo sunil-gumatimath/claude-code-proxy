@@ -31,6 +31,7 @@ import {
 	isFreeTarget,
 	parseTarget,
 	providerEnabled,
+	qualifyModel,
 	type UpstreamTarget,
 } from "../providers";
 
@@ -87,18 +88,21 @@ export async function handleMessages(
 				`Model is not permitted by this free-only proxy: ${displayTarget(requestedTarget)}`,
 			);
 		}
-		const openaiBody = translateRequest(
-			body,
-			requestedTarget.provider === "kilo" ? config.modelPrefix : "",
-			config.defaultModel,
-		);
-		openaiBody.model = requestedTarget.model;
+		const openaiBody = translateRequest(body, config.defaultModel);
+		// MODEL_PREFIX is applied here — the single place the upstream model
+		// name is finalized — so translateRequest stays prefix-free.
+		openaiBody.model = qualifyModel(requestedTarget, config);
 		debug("Translated OpenAI body", openaiBody);
 
 		// When proxy authentication is configured, the client token is the proxy
 		// secret and must never be forwarded as an upstream provider key.
 		const requestApiKey = config.proxyApiKey ? "" : extractApiKey(req);
-		const enabledTargets = buildCandidateTargets(requestedTarget, body, config);
+		const enabledTargets = buildCandidateTargets(
+			requestedTarget,
+			body,
+			config,
+			requestApiKey,
+		);
 		if (!enabledTargets.length) {
 			return anthropicError(
 				400,
@@ -133,7 +137,7 @@ export async function handleMessages(
 			const provider = getProvider(config, target.provider);
 			const apiKey = provider.apiKey || requestApiKey;
 			if (!apiKey) continue;
-			openaiBody.model = target.model;
+			openaiBody.model = qualifyModel(target, config);
 			recordModelRequest(displayTarget(target));
 			controller = new AbortController();
 			abortUpstream = () => controller.abort("Client disconnected");
@@ -177,7 +181,11 @@ export async function handleMessages(
 
 				const errText = await response.text();
 				recordUpstreamError(response.status);
-				if (response.status === 429 || response.status >= 500)
+				if (
+					response.status === 429 ||
+					response.status === 404 ||
+					response.status >= 500
+				)
 					runtime.cooldowns.fail(displayTarget(target));
 				if (canFallback(response.status, attempt, targets.length)) {
 					log(
@@ -205,7 +213,9 @@ export async function handleMessages(
 					return anthropicError(
 						504,
 						"api_error",
-						`Upstream timeout after ${config.upstreamTimeoutMs}ms`,
+						req.signal.aborted
+							? "Client disconnected."
+							: `Upstream timeout after ${config.upstreamTimeoutMs}ms`,
 					);
 				}
 				recordUpstreamError();
@@ -275,6 +285,36 @@ export async function handleMessages(
 		releaseSlot?.();
 		finishRequest?.();
 	}
+}
+
+/**
+ * POST /v1/messages/count_tokens — Claude Code calls this for context
+ * accounting. OpenAI-compatible upstreams have no equivalent endpoint, so we
+ * return a deterministic character-based estimate (Anthropic's own heuristic
+ * is roughly chars/4). The proxy treats it as an estimate only.
+ */
+export async function handleCountTokens(
+	req: Request,
+	config: Config,
+): Promise<Response> {
+	if (!isAuthorized(req, config.proxyApiKey)) {
+		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
+	}
+	const bodyText = await readBodyLimited(req, config.maxBodyBytes);
+	try {
+		JSON.parse(bodyText);
+	} catch {
+		return anthropicError(
+			400,
+			"invalid_request_error",
+			"Request body must be valid JSON.",
+		);
+	}
+	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
+	return Response.json(
+		{ input_tokens: inputTokens },
+		{ headers: { "Cache-Control": "no-store" } },
+	);
 }
 
 async function handleSync(
@@ -470,7 +510,9 @@ export function canFallback(
 ): boolean {
 	return (
 		attempt < totalAttempts - 1 &&
-		(status === 408 || status === 429 || status >= 500)
+		// 404 = model retired/renamed (common as free pools rotate); try the
+		// next candidate instead of failing the whole request.
+		(status === 404 || status === 408 || status === 429 || status >= 500)
 	);
 }
 
@@ -504,6 +546,7 @@ export function buildCandidateTargets(
 	first: UpstreamTarget,
 	body: AnthropicMessagesRequest,
 	config: Config,
+	requestApiKey = "",
 ): UpstreamTarget[] {
 	const needsTools = Boolean(body.tools?.length);
 	const needsVision =
@@ -520,7 +563,9 @@ export function buildCandidateTargets(
 		...new Map(
 			targets
 				.filter((target) => isTargetAllowed(target, config))
-				.filter((target) => providerEnabled(config, target.provider))
+				.filter((target) =>
+					providerEnabled(config, target.provider, requestApiKey),
+				)
 				.filter((target) => {
 					const capabilities = getCapabilities(target);
 					return (
@@ -535,8 +580,12 @@ export function buildCandidateTargets(
 
 export function isTargetAllowed(target: UpstreamTarget, config: Config): boolean {
 	const id = displayTarget(target);
-	if (config.freeModelsOnly && !isFreeTarget(target)) return false;
-	return !config.allowedModels.length || config.allowedModels.includes(id);
+	const explicitlyAllowed = config.allowedModels.includes(id);
+	// FREE_MODELS_ONLY rejects paid models unless the operator has explicitly
+	// allowlisted them (ALLOWED_MODELS is an explicit approval list).
+	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed)
+		return false;
+	return !config.allowedModels.length || explicitlyAllowed;
 }
 
 export function globMatches(pattern: string, value: string): boolean {
