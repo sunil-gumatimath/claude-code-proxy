@@ -9,6 +9,7 @@ import {
 	resolveTarget,
 } from "../src/handlers/messages";
 import type { AnthropicMessagesRequest } from "../src/types";
+import { qualifyModel } from "../src/providers";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -23,27 +24,29 @@ const defaultConfig: Config = {
 	modelPrefix: "",
 	defaultModel: "claude-sonnet-4-20250514",
 	fallbackModels: [
-		"kilo/poolside/laguna-m.1:free",
+		"kilo/poolside/laguna-s-2.1:free",
 		"kilo/cohere/north-mini-code:free",
 		"kilo/stepfun/step-3.7-flash:free",
-		"opencode/big-pickle",
 		"opencode/deepseek-v4-flash-free",
+		"opencode/longcat-2.0-free",
+		"opencode/laguna-s-2.1-free",
 	],
 	allowedModels: [
 		"opencode/deepseek-v4-flash-free",
-		"opencode/big-pickle",
+		"opencode/longcat-2.0-free",
 		"opencode/mimo-v2.5-free",
 		"opencode/north-mini-code-free",
 		"opencode/nemotron-3-ultra-free",
+		"opencode/laguna-s-2.1-free",
 		"kilo/stepfun/step-3.7-flash:free",
-		"kilo/poolside/laguna-m.1:free",
+		"kilo/poolside/laguna-s-2.1:free",
 		"kilo/cohere/north-mini-code:free",
 	],
 	freeModelsOnly: true,
 	modelAliases: [
 		{ pattern: "*haiku*", model: "kilo/stepfun/step-3.7-flash:free" },
 		{ pattern: "*sonnet*", model: "opencode/deepseek-v4-flash-free" },
-		{ pattern: "*opus*", model: "kilo/poolside/laguna-m.1:free" },
+		{ pattern: "*opus*", model: "kilo/poolside/laguna-s-2.1:free" },
 	],
 	smartRouting: true,
 	maxConcurrentRequests: 4,
@@ -127,6 +130,10 @@ describe("canFallback", () => {
 		expect(canFallback(408, 0, 2)).toBe(true);
 	});
 
+	test("404 with remaining attempts → true (retired model)", () => {
+		expect(canFallback(404, 0, 2)).toBe(true);
+	});
+
 	test("400 with remaining attempts → false", () => {
 		expect(canFallback(400, 0, 2)).toBe(false);
 	});
@@ -185,6 +192,12 @@ describe("isTargetAllowed", () => {
 				cfg,
 			),
 		).toBe(true);
+		expect(
+			isTargetAllowed(
+				{ provider: "opencode", model: "laguna-s-2.1-free" },
+				cfg,
+			),
+		).toBe(true);
 	});
 
 	test("paid model with freeModelsOnly → false", () => {
@@ -209,9 +222,24 @@ describe("isTargetAllowed", () => {
 		});
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "big-pickle" },
+				{ provider: "opencode", model: "longcat-2.0-free" },
 				cfgRestricted,
 			),
+		).toBe(false);
+	});
+
+	test("explicitly allowlisted paid model passes freeModelsOnly", () => {
+		const cfgPaid = request({
+			allowedModels: ["opencode/deepseek-v4-flash"],
+		});
+		expect(
+			isTargetAllowed({ provider: "opencode", model: "deepseek-v4-flash" }, cfgPaid),
+		).toBe(true);
+	});
+
+	test("paid model not allowlisted rejected under freeModelsOnly", () => {
+		expect(
+			isTargetAllowed({ provider: "opencode", model: "deepseek-v4-flash" }, request()),
 		).toBe(false);
 	});
 
@@ -230,9 +258,9 @@ describe("isTargetAllowed", () => {
 
 describe("resolveTarget", () => {
 	test("provider-qualified model returns that target", () => {
-		const target = resolveTarget("opencode/big-pickle", {}, request());
+		const target = resolveTarget("opencode/longcat-2.0-free", {}, request());
 		expect(target.provider).toBe("opencode");
-		expect(target.model).toBe("big-pickle");
+		expect(target.model).toBe("longcat-2.0-free");
 	});
 
 	test("explicit opencode model skips smart routing", () => {
@@ -323,7 +351,7 @@ describe("buildCandidateTargets", () => {
 		expect(new Set(ids).size).toBe(ids.length);
 	});
 
-	test("filters out non-free models when freeModelsOnly is true", () => {
+	test("explicitly allowlisted paid model survives freeModelsOnly", () => {
 		const cfgPaid = request({
 			allowedModels: ["kilo/paid-model", "opencode/deepseek-v4-flash-free"],
 			fallbackModels: ["kilo/paid-model"],
@@ -333,7 +361,20 @@ describe("buildCandidateTargets", () => {
 			{ messages: [{ role: "user", content: "hi" }] },
 			cfgPaid,
 		);
-		// paid-model should be filtered out by isFreeTarget check
+		// ALLOWED_MODELS is an explicit approval list — the operator opted in
+		expect(targets.length).toBe(1);
+	});
+
+	test("unapproved paid model filtered out under freeModelsOnly", () => {
+		const cfgPaid = request({
+			allowedModels: ["opencode/deepseek-v4-flash-free"],
+			fallbackModels: ["kilo/paid-model"],
+		});
+		const targets = buildCandidateTargets(
+			{ provider: "kilo", model: "paid-model" },
+			{ messages: [{ role: "user", content: "hi" }] },
+			cfgPaid,
+		);
 		expect(targets.length).toBe(0);
 	});
 
@@ -350,6 +391,64 @@ describe("buildCandidateTargets", () => {
 		expect(targets.length).toBeGreaterThanOrEqual(1);
 	});
 
-	// Note: buildCandidateTargets also filters by providerEnabled, which
-	// requires non-empty API keys in config — our fixture has both set.
+	test("request-supplied API key enables a provider with no config key", () => {
+		const cfgNoKeys = request({ kiloApiKey: "", opencodeApiKey: "" });
+		// Without a request key: no provider enabled → no candidates
+		expect(
+			buildCandidateTargets(
+				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ messages: [{ role: "user", content: "hi" }] },
+				cfgNoKeys,
+			),
+		).toHaveLength(0);
+		// With a request key: candidates are enabled (README header-key mode)
+		expect(
+			buildCandidateTargets(
+				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ messages: [{ role: "user", content: "hi" }] },
+				cfgNoKeys,
+				"sk-request-key",
+			).length,
+		).toBeGreaterThanOrEqual(1);
+	});
+});
+
+// ── qualifyModel ────────────────────────────────────────────────────────────
+
+describe("qualifyModel", () => {
+	test("kilo target with MODEL_PREFIX gets prefixed", () => {
+		const cfg = request({ modelPrefix: "anthropic/" });
+		expect(
+			qualifyModel({ provider: "kilo", model: "claude-sonnet-4" }, cfg),
+		).toBe("anthropic/claude-sonnet-4");
+	});
+
+	test("kilo target already prefixed is not double-prefixed", () => {
+		const cfg = request({ modelPrefix: "anthropic/" });
+		expect(
+			qualifyModel(
+				{ provider: "kilo", model: "anthropic/claude-sonnet-4" },
+				cfg,
+			),
+		).toBe("anthropic/claude-sonnet-4");
+	});
+
+	test("opencode target ignores MODEL_PREFIX", () => {
+		const cfg = request({ modelPrefix: "anthropic/" });
+		expect(
+			qualifyModel(
+				{ provider: "opencode", model: "deepseek-v4-flash" },
+				cfg,
+			),
+		).toBe("deepseek-v4-flash");
+	});
+
+	test("no MODEL_PREFIX leaves model untouched", () => {
+		expect(
+			qualifyModel(
+				{ provider: "kilo", model: "stepfun/step-3.7-flash:free" },
+				request(),
+			),
+		).toBe("stepfun/step-3.7-flash:free");
+	});
 });

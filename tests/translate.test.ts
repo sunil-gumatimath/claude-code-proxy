@@ -6,29 +6,25 @@ import {
 } from "../src/translate";
 
 describe("translateRequest", () => {
-	test("prefixes model name", () => {
-		const out = translateRequest(
-			{
-				model: "claude-sonnet-4-20250514",
-				messages: [{ role: "user", content: "hi" }],
-				max_tokens: 100,
-			},
-			"anthropic/",
-		);
-		expect(out.model).toBe("anthropic/claude-sonnet-4-20250514");
+	test("keeps requested model name and maps messages", () => {
+		const out = translateRequest({
+			model: "claude-sonnet-4-20250514",
+			messages: [{ role: "user", content: "hi" }],
+			max_tokens: 100,
+		});
+		expect(out.model).toBe("claude-sonnet-4-20250514");
 		expect(out.messages[0]).toEqual({ role: "user", content: "hi" });
 		expect(out.max_tokens).toBe(100);
 	});
 
-	test("does not double-prefix model", () => {
+	test("uses default model when request omits it", () => {
 		const out = translateRequest(
 			{
-				model: "anthropic/claude-sonnet-4-20250514",
 				messages: [{ role: "user", content: "hi" }],
 			},
-			"anthropic/",
+			"fallback-model",
 		);
-		expect(out.model).toBe("anthropic/claude-sonnet-4-20250514");
+		expect(out.model).toBe("fallback-model");
 	});
 
 	test("maps system string and tools", () => {
@@ -80,7 +76,6 @@ describe("translateRequest", () => {
 					},
 				],
 			},
-			"",
 		);
 		expect(out.messages).toEqual([
 			{ role: "tool", tool_call_id: "call_1", content: "ok" },
@@ -106,7 +101,6 @@ describe("translateRequest", () => {
 					},
 				],
 			},
-			"",
 		);
 		expect(out.messages[0].content).toBe("Using tool");
 		expect(out.messages[0].tool_calls?.[0]).toMatchObject({
@@ -123,13 +117,12 @@ describe("translateRequest", () => {
 				system: [{ type: "text", text: "Be concise." }],
 				messages: [{ role: "user", content: "hi" }],
 			},
-			"",
 		);
 		expect(out.messages[0]).toEqual({ role: "system", content: "Be concise." });
 	});
 
 	test("handles missing messages gracefully", () => {
-		const out = translateRequest({ model: "m" }, "");
+		const out = translateRequest({ model: "m" });
 		expect(out.messages).toEqual([]);
 	});
 
@@ -145,22 +138,22 @@ describe("translateRequest", () => {
 			],
 		};
 
-		const anyOut = translateRequest(
-			{ ...base, tool_choice: { type: "any" as const } },
-			"",
-		);
+		const anyOut = translateRequest({
+			...base,
+			tool_choice: { type: "any" as const },
+		});
 		expect(anyOut.tool_choice).toBe("required");
 
-		const noneOut = translateRequest(
-			{ ...base, tool_choice: { type: "none" as const } },
-			"",
-		);
+		const noneOut = translateRequest({
+			...base,
+			tool_choice: { type: "none" as const },
+		});
 		expect(noneOut.tool_choice).toBe("none");
 
-		const specificOut = translateRequest(
-			{ ...base, tool_choice: { type: "tool" as const, name: "f" } },
-			"",
-		);
+		const specificOut = translateRequest({
+			...base,
+			tool_choice: { type: "tool" as const, name: "f" },
+		});
 		expect(specificOut.tool_choice).toEqual({
 			type: "function",
 			function: { name: "f" },
@@ -174,7 +167,6 @@ describe("translateRequest", () => {
 				messages: [{ role: "user", content: "hi" }],
 				thinking: { type: "enabled", budget_tokens: 2000 },
 			},
-			"",
 		);
 		expect(low.reasoning_effort).toBe("low");
 
@@ -184,7 +176,6 @@ describe("translateRequest", () => {
 				messages: [{ role: "user", content: "hi" }],
 				thinking: { type: "enabled", budget_tokens: 6000 },
 			},
-			"",
 		);
 		expect(med.reasoning_effort).toBe("medium");
 
@@ -194,7 +185,6 @@ describe("translateRequest", () => {
 				messages: [{ role: "user", content: "hi" }],
 				thinking: { type: "enabled", budget_tokens: 15000 },
 			},
-			"",
 		);
 		expect(high.reasoning_effort).toBe("high");
 	});
@@ -224,7 +214,6 @@ describe("translateRequest", () => {
 					},
 				],
 			},
-			"",
 		);
 		const content = out.messages[0].content as unknown[];
 		expect(content).toHaveLength(3);
@@ -255,7 +244,6 @@ describe("translateRequest", () => {
 					},
 				],
 			},
-			"",
 		);
 		expect(out.messages[0].content as string).toContain("[Document]");
 		expect(out.messages[0].content as string).toContain("Hello from doc");
@@ -269,58 +257,51 @@ describe("translateRequest", () => {
 				stop_sequences: ["\n\n", "."],
 				top_p: 0.9,
 			},
-			"",
 		);
 		expect(out.stop).toEqual(["\n\n", "."]);
 		expect(out.top_p).toBe(0.9);
 	});
 
-	test("handles tool_result with is_error", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "user",
-						content: [
-							{
-								type: "tool_result",
-								tool_use_id: "call_1",
-								content: "error occurred",
-								is_error: true,
-							},
-						],
-					},
-				],
-			},
-			"",
-		);
-		expect(out.messages[0]).toMatchObject({
+	test("does not forward non-standard is_error on tool results", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "call_1",
+							content: "error occurred",
+							is_error: true,
+						},
+					],
+				},
+			],
+		});
+		expect(out.messages[0]).toEqual({
 			role: "tool",
 			tool_call_id: "call_1",
 			content: "error occurred",
-			is_error: true,
 		});
 	});
 
-	test("ignores thinking blocks in assistant messages", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "assistant",
-						content: [
-							{ type: "thinking", thinking: "I should use a tool" },
-							{ type: "text", text: "Final answer" },
-						] as any,
-					},
-				],
-			},
-			"",
-		);
-		// Thinking has no OpenAI equivalent — only text content is kept
+	test("passes thinking blocks through as reasoning_content", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "I should use a tool" },
+						{ type: "text", text: "Final answer" },
+					],
+				},
+			],
+		});
+		// Thinking-mode gateways demand reasoning passthrough on follow-ups
 		expect(out.messages[0].content).toBe("Final answer");
+		expect(out.messages[0].reasoning_content).toBe("I should use a tool");
 	});
 });
 
@@ -697,7 +678,7 @@ describe("StreamTranslator", () => {
 		expect(joined).toContain("fn2");
 	});
 
-	test("usage stats propagate through stream", () => {
+	test("usage stats propagate through stream (output only per spec)", () => {
 		const t = new StreamTranslator("m");
 		t.processChunk(
 			JSON.stringify({
@@ -711,7 +692,8 @@ describe("StreamTranslator", () => {
 			}),
 		);
 		const joined = end.join("");
-		expect(joined).toContain('"input_tokens":7');
+		// Anthropic message_delta.usage carries output_tokens only
 		expect(joined).toContain('"output_tokens":3');
+		expect(joined).not.toContain('"input_tokens"');
 	});
 });
