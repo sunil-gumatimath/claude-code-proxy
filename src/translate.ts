@@ -16,7 +16,6 @@ import type {
 
 export function translateRequest(
 	body: AnthropicMessagesRequest,
-	modelPrefix: string,
 	defaultModel = "claude-sonnet-4-20250514",
 ): OpenAIChatRequest {
 	const openai: OpenAIChatRequest = {
@@ -24,9 +23,9 @@ export function translateRequest(
 		messages: [],
 	};
 
-	const model = body.model || defaultModel;
-	openai.model =
-		modelPrefix && model.startsWith(modelPrefix) ? model : modelPrefix + model;
+	// The upstream model name is finalized by the handler via qualifyModel()
+	// (provider prefix + MODEL_PREFIX); here we only keep the raw requested name.
+	openai.model = body.model || defaultModel;
 
 	const messages: OpenAIMessage[] = [];
 
@@ -122,6 +121,7 @@ function translateAssistantMessage(
 	blocks: AnthropicContentBlock[],
 ): OpenAIMessage[] {
 	const textParts: string[] = [];
+	const thinkingParts: string[] = [];
 	const toolCalls: NonNullable<OpenAIMessage["tool_calls"]> = [];
 
 	for (const block of blocks) {
@@ -138,14 +138,20 @@ function translateAssistantMessage(
 						typeof input === "string" ? input : JSON.stringify(input ?? {}),
 				},
 			});
+		} else if (block.type === "thinking" && "thinking" in block) {
+			// OpenAI-compatible gateways in thinking mode demand the model's
+			// reasoning be passed back verbatim on follow-up turns
+			// ("reasoning_content must be passed back to the API").
+			thinkingParts.push(String(block.thinking));
 		}
-		// "thinking" blocks — no OpenAI equivalent; skipped intentionally
+		// "redacted_thinking" blocks are intentionally dropped
 	}
 
 	const out: OpenAIMessage = {
 		role: "assistant",
 		content: textParts.join("\n") || null,
 	};
+	if (thinkingParts.length) out.reasoning_content = thinkingParts.join("\n");
 	if (toolCalls.length) out.tool_calls = toolCalls;
 	return [out];
 }
@@ -224,16 +230,14 @@ function translateUserMessage(
 					.join("\n");
 			}
 
-			const toolMsg: OpenAIMessage = {
+			// Note: Anthropic's is_error has no OpenAI equivalent; the field is
+			// deliberately NOT forwarded — non-standard keys can 400 strict
+			// OpenAI-compatible gateways. The error text itself is in content.
+			result.push({
 				role: "tool",
 				tool_call_id: String(block.tool_use_id),
 				content: toolContent || "",
-			};
-			// Some gateways accept this for failed tools
-			if ("is_error" in block && block.is_error) {
-				(toolMsg as OpenAIMessage & { is_error?: boolean }).is_error = true;
-			}
-			result.push(toolMsg);
+			});
 		}
 	}
 
@@ -662,9 +666,9 @@ export class StreamTranslator {
 					stop_reason: mapFinishReason(finishReason),
 					stop_sequence: null,
 				},
+				// Anthropic spec: message_delta.usage carries output_tokens only.
 				usage: {
 					output_tokens: this.outputTokens,
-					input_tokens: this.inputTokens,
 				},
 			}),
 			sse("message_stop", { type: "message_stop" }),
