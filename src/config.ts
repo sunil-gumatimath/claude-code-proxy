@@ -2,6 +2,8 @@
 // config.ts — Environment configuration (validated, immutable)
 // ============================================================================
 
+import type { ReasoningEffort } from "./types";
+
 function envBool(key: string, fallback = false): boolean {
   const v = Bun.env[key];
   if (v == null || v === "") return fallback;
@@ -38,6 +40,8 @@ export interface Config {
   /** Reject paid and unapproved models instead of forwarding them upstream. */
   freeModelsOnly: boolean;
   modelAliases: Array<{ pattern: string; model: string }>;
+  /** Forced upstream reasoning effort; "" derives it from the thinking budget. */
+  reasoningEffort: ReasoningEffort;
   smartRouting: boolean;
   maxConcurrentRequests: number;
   maxQueuedRequests: number;
@@ -85,6 +89,7 @@ export function loadConfig(): Config {
       Bun.env.MODEL_ALIASES ??
         "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=opencode/deepseek-v4-flash-free,*opus*=kilo/poolside/laguna-s-2.1:free"
     ),
+    reasoningEffort: parseReasoningEffort(Bun.env.REASONING_EFFORT ?? ""),
     smartRouting: envBool("SMART_ROUTING", true),
     maxConcurrentRequests: envInt("MAX_CONCURRENT_REQUESTS", 4),
     maxQueuedRequests: envInt("MAX_QUEUED_REQUESTS", 20),
@@ -99,6 +104,19 @@ export function loadConfig(): Config {
       .map((origin) => origin.trim())
       .filter(Boolean),
   };
+}
+
+const REASONING_EFFORTS: Record<string, true> = {
+  low: true,
+  medium: true,
+  high: true,
+  xhigh: true,
+  max: true,
+};
+
+function parseReasoningEffort(raw: string): ReasoningEffort {
+  const v = raw.trim().toLowerCase();
+  return (REASONING_EFFORTS[v] ? v : "") as ReasoningEffort;
 }
 
 function parseAliases(raw: string): Array<{ pattern: string; model: string }> {

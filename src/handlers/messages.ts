@@ -88,7 +88,11 @@ export async function handleMessages(
 				`Model is not permitted by this free-only proxy: ${displayTarget(requestedTarget)}`,
 			);
 		}
-		const openaiBody = translateRequest(body, config.defaultModel);
+		const openaiBody = translateRequest(
+			body,
+			config.defaultModel,
+			config.reasoningEffort,
+		);
 		// MODEL_PREFIX is applied here — the single place the upstream model
 		// name is finalized — so translateRequest stays prefix-free.
 		openaiBody.model = qualifyModel(requestedTarget, config);

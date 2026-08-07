@@ -48,6 +48,7 @@ const defaultConfig: Config = {
 		{ pattern: "*sonnet*", model: "opencode/deepseek-v4-flash-free" },
 		{ pattern: "*opus*", model: "kilo/poolside/laguna-s-2.1:free" },
 	],
+	reasoningEffort: "",
 	smartRouting: true,
 	maxConcurrentRequests: 4,
 	maxQueuedRequests: 20,

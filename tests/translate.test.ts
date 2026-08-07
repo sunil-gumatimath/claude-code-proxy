@@ -189,6 +189,36 @@ describe("translateRequest", () => {
 		expect(high.reasoning_effort).toBe("high");
 	});
 
+	test("REASONING_EFFORT override wins over budget mapping", () => {
+		const forced = translateRequest(
+			{
+				model: "m",
+				messages: [{ role: "user", content: "hi" }],
+				thinking: { type: "enabled", budget_tokens: 2000 },
+			},
+			undefined,
+			"xhigh",
+		);
+		expect(forced.reasoning_effort).toBe("xhigh");
+	});
+
+	test("REASONING_EFFORT applies without client thinking", () => {
+		const forced = translateRequest(
+			{ model: "m", messages: [{ role: "user", content: "hi" }] },
+			undefined,
+			"max",
+		);
+		expect(forced.reasoning_effort).toBe("max");
+	});
+
+	test("no REASONING_EFFORT leaves budget mapping intact", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		expect(out.reasoning_effort).toBeUndefined();
+	});
+
 	test("maps image content blocks (base64 and URL)", () => {
 		const out = translateRequest(
 			{

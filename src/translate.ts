@@ -10,6 +10,7 @@ import type {
 	OpenAIChatResponse,
 	OpenAIChoice,
 	OpenAIMessage,
+	ReasoningEffort,
 } from "./types";
 
 // ─── Request Translation (Anthropic → OpenAI) ──────────────────────────────
@@ -17,6 +18,7 @@ import type {
 export function translateRequest(
 	body: AnthropicMessagesRequest,
 	defaultModel = "claude-sonnet-4-20250514",
+	reasoningEffort: ReasoningEffort = "",
 ): OpenAIChatRequest {
 	const openai: OpenAIChatRequest = {
 		model: "",
@@ -56,7 +58,13 @@ export function translateRequest(
 		openai.stream_options = { include_usage: true };
 	}
 
-	if (body.thinking?.type === "enabled") {
+	if (reasoningEffort) {
+		// REASONING_EFFORT is an explicit operator override — applied even when
+		// the client sends no thinking (Claude Code may not enable it for
+		// unrecognized models). "xhigh" is the OpenAI-standard max; OpenRouter
+		// and the OpenCode Zen gateway map it to DeepSeek's "max" effort.
+		openai.reasoning_effort = reasoningEffort;
+	} else if (body.thinking?.type === "enabled") {
 		const budget = body.thinking.budget_tokens ?? 0;
 		openai.reasoning_effort =
 			budget >= 32_000 ? "xhigh" :

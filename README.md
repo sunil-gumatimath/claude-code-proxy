@@ -103,6 +103,7 @@ key in `KILO_API_KEY`.
 | `MODEL_ALIASES` | Sonnet $\rightarrow$ DeepSeek Flash | Wildcard rules (`*sonnet*=opencode/deepseek-v4-flash-free`) |
 | `FREE_MODELS_ONLY` | `true` | Reject paid models before reaching upstream providers (explicit `ALLOWED_MODELS` entries bypass this — that list is your approval list) |
 | `ALLOWED_MODELS` | Built-in free allowlist | Permitted provider-qualified models (Kilo & OpenCode); explicitly listing a paid model here opts in to it |
+| `REASONING_EFFORT` | *(empty)* | Force upstream reasoning effort `low`/`medium`/`high`/`xhigh`/`max`. Empty derives it from Claude Code's thinking budget; `xhigh` = DeepSeek "max" reasoning on OpenCode Zen / OpenRouter |
 | `SMART_ROUTING` | `true` | Automatically routes Claude image requests to vision-capable models |
 | `MAX_CONCURRENT_REQUESTS` | `4` | Active upstream generation limit |
 | `MAX_QUEUED_REQUESTS` | `20` | Max requests waiting for a generation slot |

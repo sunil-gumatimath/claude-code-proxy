@@ -112,8 +112,11 @@ export interface OpenAIChatRequest {
   stream_options?: { include_usage?: boolean };
   tools?: unknown[];
   tool_choice?: unknown;
-  reasoning_effort?: "low" | "medium" | "high" | "xhigh";
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
+
+/** OpenAI reasoning-effort values; "" = derive from the thinking budget. */
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh" | "max" | "";
 
 export interface OpenAIChoice {
   index?: number;
