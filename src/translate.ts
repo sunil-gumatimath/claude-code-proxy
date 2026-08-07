@@ -4,8 +4,10 @@
 
 import type {
 	AnthropicContentBlock,
+	AnthropicMessage,
 	AnthropicMessageResponse,
 	AnthropicMessagesRequest,
+	AnthropicTextBlock,
 	OpenAIChatRequest,
 	OpenAIChatResponse,
 	OpenAIChoice,
@@ -43,8 +45,9 @@ export function translateRequest(
 		}
 	}
 
+	const answeredToolIds = collectAnsweredToolIds(body.messages || []);
 	for (const msg of body.messages || []) {
-		messages.push(...translateMessage(msg));
+		messages.push(...translateMessage(msg, answeredToolIds));
 	}
 	openai.messages = messages;
 
@@ -101,10 +104,13 @@ export function translateRequest(
 	return openai;
 }
 
-function translateMessage(msg: {
-	role: string;
-	content: string | AnthropicContentBlock[];
-}): OpenAIMessage[] {
+function translateMessage(
+	msg: {
+		role: string;
+		content: string | AnthropicContentBlock[];
+	},
+	answeredToolIds: ReadonlySet<string> = new Set(),
+): OpenAIMessage[] {
 	const role = msg.role;
 
 	if (typeof msg.content === "string") {
@@ -115,18 +121,40 @@ function translateMessage(msg: {
 		return [{ role, content: "" }];
 	}
 
-	if (role === "assistant") return translateAssistantMessage(msg.content);
+	if (role === "assistant") return translateAssistantMessage(msg.content, answeredToolIds);
 	if (role === "user") return translateUserMessage(msg.content);
 
 	const text = msg.content
-		.filter((b) => b.type === "text")
-		.map((b) => ("text" in b ? String(b.text) : ""))
+		.filter((b) => b.type === "text" && "text" in b)
+		.map((b) => (b as AnthropicTextBlock).text)
 		.join("\n");
-	return [{ role, content: text || "" }];
+	return [{ role, content: text }];
+}
+
+/**
+ * Tool call ids that some tool_result in the request answers. Tool calls the
+ * upstream never generated (e.g. fabricated by an interrupted stream, or a
+ * tool run the client abandoned) must not be echoed: strict gateways reject
+ * assistant tool_calls that no tool message follows up on.
+ */
+function collectAnsweredToolIds(
+	messages: AnthropicMessage[],
+): ReadonlySet<string> {
+	const answered = new Set<string>();
+	for (const msg of messages) {
+		if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+		for (const block of msg.content) {
+			if (block.type === "tool_result" && "tool_use_id" in block) {
+				answered.add(String(block.tool_use_id));
+			}
+		}
+	}
+	return answered;
 }
 
 function translateAssistantMessage(
 	blocks: AnthropicContentBlock[],
+	answeredToolIds: ReadonlySet<string> = new Set(),
 ): OpenAIMessage[] {
 	const textParts: string[] = [];
 	const thinkingParts: string[] = [];
@@ -136,6 +164,10 @@ function translateAssistantMessage(
 		if (block.type === "text" && "text" in block) {
 			textParts.push(String(block.text));
 		} else if (block.type === "tool_use" && "id" in block && "name" in block) {
+			// Drop tool calls no tool_result answers: echoing them back to a
+			// strict gateway 400s the whole turn ("tool_calls must be followed
+			// by tool messages").
+			if (!answeredToolIds.has(String(block.id))) continue;
 			const input = "input" in block ? block.input : {};
 			toolCalls.push({
 				id: String(block.id),
@@ -157,7 +189,9 @@ function translateAssistantMessage(
 
 	const out: OpenAIMessage = {
 		role: "assistant",
-		content: textParts.join("\n") || null,
+		// Empty string keeps the message valid: gateways reject assistant
+		// messages whose content is null/missing when reasoning_content is set.
+		content: textParts.join("\n"),
 	};
 	if (thinkingParts.length) out.reasoning_content = thinkingParts.join("\n");
 	if (toolCalls.length) out.tool_calls = toolCalls;
@@ -349,6 +383,9 @@ export class StreamTranslator {
 	private thinkingBlockActive = false;
 	private thinkingBlockIdx = -1;
 	private nextBlockIdx = 0;
+	/** A text/tool block was fully started (message will be valid on echo). */
+	private sawText = false;
+	private sawTool = false;
 	/** OpenAI tool_call index → Anthropic content block index */
 	private toolMap = new Map<
 		number,
@@ -459,6 +496,7 @@ export class StreamTranslator {
 			if (!this.textBlockActive) {
 				this.textBlockIdx = this.nextBlockIdx++;
 				this.textBlockActive = true;
+				this.sawText = true;
 				events.push(
 					sse("content_block_start", {
 						type: "content_block_start",
@@ -523,6 +561,7 @@ export class StreamTranslator {
 
 				if (!entry.started && entry.id && entry.name) {
 					entry.started = true;
+					this.sawTool = true;
 					events.push(
 						sse("content_block_start", {
 							type: "content_block_start",
@@ -615,36 +654,13 @@ export class StreamTranslator {
 		}
 
 		for (const [, entry] of this.toolMap) {
-			// Upstream closed before sending metadata. Keep the Anthropic stream valid
-			// while making the malformed upstream response visible to the client.
-			if (!entry.started) {
-				entry.id ||= `toolu_${uid()}`;
-				entry.name ||= "unknown_tool";
-				events.push(
-					sse("content_block_start", {
-						type: "content_block_start",
-						index: entry.blockIdx,
-						content_block: {
-							type: "tool_use",
-							id: entry.id,
-							name: entry.name,
-							input: {},
-						},
-					}),
-				);
-				if (entry.pendingArgs) {
-					events.push(
-						sse("content_block_delta", {
-							type: "content_block_delta",
-							index: entry.blockIdx,
-							delta: {
-								type: "input_json_delta",
-								partial_json: entry.pendingArgs,
-							},
-						}),
-					);
-				}
-			}
+			// Never fabricate tool_use blocks for tool calls the upstream failed
+			// to describe (no id/name arrived). A fake ID poisons the conversation
+			// history: the client echoes the dangling tool call back and strict
+			// gateways reject the next turn ("tool_calls must be followed by
+			// tool messages"). Drop the incomplete call instead — the stream
+			// closes with whatever blocks actually started.
+			if (!entry.started) continue;
 			events.push(
 				sse("content_block_stop", {
 					type: "content_block_stop",
@@ -653,12 +669,20 @@ export class StreamTranslator {
 			);
 		}
 
-		if (this.nextBlockIdx === 0) {
+		if (!this.sawText && !this.sawTool) {
+			// Message would carry only a thinking block (or nothing) — invalid on
+			// echo: OpenAI-style gateways demand content or tool_calls alongside
+			// reasoning_content. Emit a neutral text block so the turn round-trips.
 			events.push(
 				sse("content_block_start", {
 					type: "content_block_start",
 					index: 0,
 					content_block: { type: "text", text: "" },
+				}),
+				sse("content_block_delta", {
+					type: "content_block_delta",
+					index: 0,
+					delta: { type: "text_delta", text: "(stream ended before completion)" },
 				}),
 				sse("content_block_stop", {
 					type: "content_block_stop",

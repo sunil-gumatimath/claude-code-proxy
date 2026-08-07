@@ -99,6 +99,12 @@ describe("translateRequest", () => {
 							},
 						],
 					},
+					{
+						role: "user",
+						content: [
+							{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
+						],
+					},
 				],
 			},
 		);
@@ -108,6 +114,34 @@ describe("translateRequest", () => {
 			type: "function",
 			function: { name: "search", arguments: '{"q":"bun"}' },
 		});
+	});
+
+	test("drops tool_use echoed without a matching tool_result", () => {
+		// A tool call the upstream never generated (interrupted stream) must
+		// not be echoed: strict gateways 400 tool_calls with no follow-up tool
+		// message.
+		const out = translateRequest(
+			{
+				model: "m",
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{ type: "text", text: "Using tool" },
+							{
+								type: "tool_use",
+								id: "toolu_ghost",
+								name: "search",
+								input: { q: "bun" },
+							},
+						],
+					},
+					{ role: "user", content: "continue anyway" },
+				],
+			},
+		);
+		expect(out.messages[0].tool_calls).toBeUndefined();
+		expect(out.messages[0].content).toBe("Using tool");
 	});
 
 	test("maps system as array of text blocks", () => {
@@ -332,6 +366,23 @@ describe("translateRequest", () => {
 		// Thinking-mode gateways demand reasoning passthrough on follow-ups
 		expect(out.messages[0].content).toBe("Final answer");
 		expect(out.messages[0].reasoning_content).toBe("I should use a tool");
+	});
+
+	test("thinking-only echo keeps empty content instead of null", () => {
+		// A truncated turn (thinking but no text) must round-trip as content ""
+		// — gateways reject assistant messages with null content when
+		// reasoning_content is present.
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "thinking", thinking: "planning..." }],
+				},
+			],
+		});
+		expect(out.messages[0].content).toBe("");
+		expect(out.messages[0].reasoning_content).toBe("planning...");
 	});
 });
 
@@ -620,6 +671,49 @@ describe("StreamTranslator", () => {
 		expect(joined).toContain("content_block_start");
 		expect(joined).toContain("thinking");
 		expect(joined).toContain("Let me think...");
+	});
+
+	test("reasoning-only stream finalizes with a text block", () => {
+		// Upstream died after reasoning but before any content: a thinking-only
+		// assistant message would round-trip as content:null + reasoning_content,
+		// which strict gateways reject. The translator must append a text block.
+		const t = new StreamTranslator("m");
+		t.processChunk(
+			JSON.stringify({
+				choices: [{ delta: { reasoning_content: "planning..." }, index: 0 }],
+			}),
+		);
+		const end = t.finalize("stop");
+		const joined = end.join("");
+		expect(joined).toContain('"type":"text"');
+		expect(joined).toContain("stream ended before completion");
+		expect(joined).toContain("message_stop");
+	});
+
+	test("finalize drops incomplete tool calls without fabricating IDs", () => {
+		// Upstream streamed tool fragments but closed before sending id/name:
+		// fabricating a toolu_ block makes the client echo a dangling tool call
+		// that strict gateways reject on the next turn. Drop it instead.
+		const t = new StreamTranslator("m");
+		t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{ index: 0, function: { arguments: '{"cmd":"echo"}' } },
+							],
+						},
+					},
+				],
+			}),
+		);
+		const end = t.finalize("stop");
+		const joined = end.join("");
+		expect(joined).not.toContain("toolu_");
+		expect(joined).not.toContain("unknown_tool");
+		expect(joined).toContain("message_stop");
+		expect(joined).toContain('"type":"text"'); // truncation marker keeps it valid
 	});
 
 	test("transitions from thinking to text block cleanly", () => {
