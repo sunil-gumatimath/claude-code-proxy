@@ -1,9 +1,8 @@
 # claude-code-proxy
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-Bun-black)](https://bun.sh)
 
-An open-source local proxy that lets [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
+A public-source local proxy that lets [Claude Code](https://docs.anthropic.com/en/docs/claude-code)
 use Kilo Gateway, OpenCode Zen, or another OpenAI-compatible Chat Completions API.
 
 It translates Anthropic Messages requests into OpenAI Chat Completions requests,
@@ -113,7 +112,3 @@ bun run typecheck
 The proxy binds to localhost by default. Do not expose it to an untrusted
 network; if you bind beyond localhost, set `PROXY_API_KEY` and restrict network
 access. Never commit `.env`.
-
-## License
-
-[MIT](./LICENSE)

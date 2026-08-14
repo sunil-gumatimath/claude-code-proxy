@@ -2,7 +2,7 @@
   "name": "claude-code-proxy",
   "version": "1.0.0",
   "description": "Use Kilo Code models with Claude Code. Production-ready local proxy translating Anthropic Messages API ↔ OpenAI Chat Completions for Kilo Gateway (or any OpenAI-compatible API).",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "type": "module",
   "private": false,
   "author": "TED",
@@ -34,7 +34,6 @@
   },
   "files": [
     "src",
-    "LICENSE",
     "README.md",
     ".env.example"
   ],
