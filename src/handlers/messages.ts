@@ -58,7 +58,17 @@ export async function handleMessages(
 		const bodyText = await readBodyLimited(req, config.maxBodyBytes);
 		let body: AnthropicMessagesRequest;
 		try {
-			body = JSON.parse(bodyText) as AnthropicMessagesRequest;
+			const parsed: unknown = JSON.parse(bodyText);
+			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+				throw new Error("INVALID_BODY");
+			}
+			body = parsed as AnthropicMessagesRequest;
+			if (body.messages !== undefined && !Array.isArray(body.messages)) {
+				throw new Error("INVALID_BODY");
+			}
+			if (body.model !== undefined && typeof body.model !== "string") {
+				throw new Error("INVALID_BODY");
+			}
 		} catch {
 			return anthropicError(
 				400,
@@ -139,7 +149,8 @@ export async function handleMessages(
 		for (let attempt = 0; attempt < targets.length; attempt++) {
 			const target = targets[attempt];
 			const provider = getProvider(config, target.provider);
-			const apiKey = provider.apiKey || requestApiKey;
+			const apiKey = provider.apiKey ||
+				(target.provider === requestedTarget.provider ? requestApiKey : "");
 			if (!apiKey) continue;
 			openaiBody.model = qualifyModel(target, config);
 			recordModelRequest(displayTarget(target));
@@ -212,7 +223,7 @@ export async function handleMessages(
 				const isAbort =
 					(err instanceof Error && err.name === "AbortError") ||
 					/abort/i.test(msg);
-				if (isAbort) {
+				if (isAbort && req.signal.aborted) {
 					req.signal.removeEventListener("abort", abortUpstream);
 					return anthropicError(
 						504,
@@ -220,6 +231,23 @@ export async function handleMessages(
 						req.signal.aborted
 							? "Client disconnected."
 							: `Upstream timeout after ${config.upstreamTimeoutMs}ms`,
+					);
+				}
+				if (isAbort) {
+					recordUpstreamError(504);
+					runtime.cooldowns.fail(displayTarget(target));
+					if (attempt < targets.length - 1) {
+						log(
+							`${colors.yellow("↳")} upstream timeout for ${dim(displayTarget(target))}; trying ${dim(displayTarget(targets[attempt + 1]))} ${dim(requestId)}`,
+						);
+						req.signal.removeEventListener("abort", abortUpstream);
+						continue;
+					}
+					req.signal.removeEventListener("abort", abortUpstream);
+					return anthropicError(
+						504,
+						"api_error",
+						`Upstream timeout after ${config.upstreamTimeoutMs}ms`,
 					);
 				}
 				recordUpstreamError();
@@ -304,7 +332,19 @@ export async function handleCountTokens(
 	if (!isAuthorized(req, config.proxyApiKey)) {
 		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
-	const bodyText = await readBodyLimited(req, config.maxBodyBytes);
+	let bodyText: string;
+	try {
+		bodyText = await readBodyLimited(req, config.maxBodyBytes);
+	} catch (err) {
+		if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
+			return anthropicError(
+				413,
+				"invalid_request_error",
+				`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
+			);
+		}
+		throw err;
+	}
 	try {
 		JSON.parse(bodyText);
 	} catch {
@@ -568,7 +608,11 @@ export function buildCandidateTargets(
 			targets
 				.filter((target) => isTargetAllowed(target, config))
 				.filter((target) =>
-					providerEnabled(config, target.provider, requestApiKey),
+					providerEnabled(
+						config,
+						target.provider,
+						target.provider === first.provider ? requestApiKey : "",
+					),
 				)
 				.filter((target) => {
 					const capabilities = getCapabilities(target);

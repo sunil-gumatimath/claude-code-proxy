@@ -565,6 +565,7 @@ describe("StreamTranslator", () => {
 					usage: { prompt_tokens: 1, completion_tokens: 1 },
 				}),
 			),
+			...t.finalize(),
 		];
 		const joined = events.join("");
 		expect(joined).toContain("message_start");
@@ -766,7 +767,7 @@ describe("StreamTranslator", () => {
 				choices: [{ delta: {}, finish_reason: "tool_calls", index: 0 }],
 			}),
 		);
-		const joined = [...e1, ...e2].join("");
+		const joined = [...e1, ...e2, ...t.finalize()].join("");
 		expect(joined).toContain("tool_use");
 		expect(joined).toContain("message_stop");
 		expect(t.isFinished).toBe(true);
@@ -815,9 +816,21 @@ describe("StreamTranslator", () => {
 				usage: { prompt_tokens: 7, completion_tokens: 3 },
 			}),
 		);
-		const joined = end.join("");
+		const joined = [...end, ...t.finalize()].join("");
 		// Anthropic message_delta.usage carries output_tokens only
 		expect(joined).toContain('"output_tokens":3');
 		expect(joined).not.toContain('"input_tokens"');
+	});
+
+	test("waits for usage-only chunk after finish", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "a" } }] }));
+		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+		const end = t.processChunk(JSON.stringify({
+			choices: [],
+			usage: { prompt_tokens: 8, completion_tokens: 4 },
+		}));
+		const joined = [...end, ...t.finalize()].join("");
+		expect(joined).toContain('"output_tokens":4');
 	});
 });

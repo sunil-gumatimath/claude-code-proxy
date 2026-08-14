@@ -4,7 +4,7 @@
 
 import type { Config } from "./config";
 import { anthropicError } from "./errors";
-import { handleCountTokens, handleMessages } from "./handlers/messages";
+import { handleCountTokens, handleMessages, isAuthorized } from "./handlers/messages";
 import { colors, banner, log, setDebug } from "./log";
 import { getMetrics, prometheusMetrics } from "./runtime";
 import { NAME, VERSION } from "./version";
@@ -54,6 +54,8 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/version") {
+        const denied = requireOperationalAuth(req, config);
+        if (denied) return withCors(denied, req, config);
         return Response.json(
           { name: NAME, version: VERSION },
           { headers: { "Cache-Control": "no-store" } }
@@ -61,6 +63,8 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/v1/models") {
+        const denied = requireOperationalAuth(req, config);
+        if (denied) return withCors(denied, req, config);
         const models = [...new Set([
           ...config.allowedModels,
           ...config.fallbackModels,
@@ -81,47 +85,41 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/metrics") {
+        const denied = requireOperationalAuth(req, config);
+        if (denied) return withCors(denied, req, config);
         return new Response(prometheusMetrics(), {
           headers: {
             "Content-Type": "text/plain; version=0.0.4; charset=utf-8",
             "Cache-Control": "no-store",
+            ...corsHeaders(req, config),
           },
         });
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard") {
+        const denied = requireOperationalAuth(req, config);
+        if (denied) return withCors(denied, req, config);
         return new Response(dashboardHtml(), {
-          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...corsHeaders(req, config) },
         });
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard.json") {
-        return Response.json(getMetrics(), { headers: { "Cache-Control": "no-store" } });
+        const denied = requireOperationalAuth(req, config);
+        if (denied) return withCors(denied, req, config);
+        return Response.json(getMetrics(), { headers: { "Cache-Control": "no-store", ...corsHeaders(req, config) } });
       }
 
       if (
         req.method === "POST" &&
         url.pathname === "/v1/messages/count_tokens"
       ) {
-        return handleCountTokens(req, config);
+        return withCors(await handleCountTokens(req, config), req, config);
       }
 
       if (req.method === "POST" && url.pathname === "/v1/messages") {
         const res = await handleMessages(req, config);
-        // Attach CORS on JSON errors / sync responses when Origin present
-        const origin = req.headers.get("origin");
-        if (origin && res.headers.get("content-type")?.includes("json")) {
-          const headers = new Headers(res.headers);
-          for (const [k, v] of Object.entries(corsHeaders(req, config))) {
-            headers.set(k, v);
-          }
-          return new Response(res.body, {
-            status: res.status,
-            statusText: res.statusText,
-            headers,
-          });
-        }
-        return res;
+        return withCors(res, req, config);
       }
 
       return anthropicError(
@@ -156,6 +154,20 @@ function corsHeaders(req: Request, config: Config): Record<string, string> {
     "Access-Control-Max-Age": "86400",
     Vary: "Origin",
   };
+}
+
+function requireOperationalAuth(req: Request, config: Config): Response | undefined {
+  return isAuthorized(req, config.proxyApiKey)
+    ? undefined
+    : anthropicError(401, "authentication_error", "Invalid proxy API key.");
+}
+
+function withCors(res: Response, req: Request, config: Config): Response {
+  const cors = corsHeaders(req, config);
+  if (!Object.keys(cors).length) return res;
+  const headers = new Headers(res.headers);
+  for (const [key, value] of Object.entries(cors)) headers.set(key, value);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
 }
 
 function printBanner(config: Config) {

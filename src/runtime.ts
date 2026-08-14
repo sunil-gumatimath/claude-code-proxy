@@ -84,10 +84,14 @@ export function prometheusMetrics(): string {
 			"# TYPE kilo_proxy_model_requests_total counter",
 			...Object.entries(m.modelRequests).map(([model, count]) => {
 				const [provider, ...parts] = model.split("/");
-				return `kilo_proxy_model_requests_total{provider="${provider}",model="${parts.join("/").replace(/\\"/g, '\\\\"')}"} ${count}`;
+				return `kilo_proxy_model_requests_total{provider="${escapePrometheusLabel(provider)}",model="${escapePrometheusLabel(parts.join("/"))}"} ${count}`;
 			}),
 		].join("\n") + "\n"
 	);
+}
+
+function escapePrometheusLabel(value: string): string {
+	return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/"/g, '\\"');
 }
 
 export class RequestLimiter {

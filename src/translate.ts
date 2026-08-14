@@ -400,6 +400,7 @@ export class StreamTranslator {
 	private inputTokens = 0;
 	private outputTokens = 0;
 	private finished = false;
+	private pendingFinishReason: string | undefined;
 
 	constructor(model: string) {
 		this.msgId = `msg_${uid()}`;
@@ -593,7 +594,10 @@ export class StreamTranslator {
 		}
 
 		if (choice.finish_reason && !this.finished) {
-			events.push(...this.emitFinish(choice.finish_reason));
+			// Providers commonly send usage in a final usage-only chunk after the
+			// finish chunk. Defer message_delta/message_stop until [DONE] or EOF so
+			// those tokens are included in the Anthropic usage event.
+			this.pendingFinishReason = choice.finish_reason;
 		}
 
 		return events;
@@ -603,7 +607,7 @@ export class StreamTranslator {
 	 * Ensure stream always ends with Anthropic close events
 	 * (e.g. upstream closed without finish_reason).
 	 */
-	finalize(reason = "stop"): string[] {
+	finalize(reason = this.pendingFinishReason || "stop"): string[] {
 		if (this.finished) return [];
 		if (!this.started) {
 			// Empty stream — still emit a minimal valid message

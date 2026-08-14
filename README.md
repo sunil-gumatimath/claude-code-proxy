@@ -121,7 +121,7 @@ Never print or commit API keys, and never commit .env.
 | `PROXY_PORT` | `4181` | Listen port |
 | `MODEL_PREFIX` | *(empty)* | Optional prefix added to model names for Kilo Gateway |
 | `DEFAULT_MODEL` | `claude-sonnet-4-20250514` | Fallback when client request omits `model` |
-| `FALLBACK_MODELS` | Provider-qualified models | Models tried after 429/5xx failures (`kilo/*` and `opencode/*`) |
+| `FALLBACK_MODELS` | Provider-qualified models | Models tried after upstream rate limits, temporary failures, or timeouts (`kilo/*` and `opencode/*`) |
 | `MODEL_ALIASES` | Sonnet $\rightarrow$ DeepSeek Flash | Wildcard rules (`*sonnet*=opencode/deepseek-v4-flash-free`) |
 | `FREE_MODELS_ONLY` | `true` | Reject paid models before reaching upstream providers (explicit `ALLOWED_MODELS` entries bypass this — that list is your approval list) |
 | `ALLOWED_MODELS` | Built-in free allowlist | Permitted provider-qualified models (Kilo & OpenCode); explicitly listing a paid model here opts in to it |
@@ -136,6 +136,14 @@ Never print or commit API keys, and never commit .env.
 | `MAX_BODY_BYTES` | `20971520` (20MB) | Max request body size in bytes |
 | `DEBUG` | `false` | Verbose debug logging (with key & payload redaction) |
 | `CORS_ALLOWED_ORIGINS` | *(unset)* | Comma-separated browser origins (disabled by default) |
+
+### TLS inspection / custom certificate authorities
+
+Keep certificate verification enabled by default. If your network uses HTTPS
+inspection, set `UPSTREAM_CA_FILE` to its root CA PEM file. As a temporary
+compatibility measure only, you can set `UPSTREAM_TLS_REJECT_UNAUTHORIZED=false`;
+this disables verification of the upstream certificate and is not appropriate
+for untrusted networks.
 
 ## Project structure
 
@@ -167,6 +175,7 @@ docker run --rm -p 4181:4181 \
 ```
 
 > Container sets `PROXY_HOST=0.0.0.0` so port publishing works. Keep the host firewall tight.
+> Set `PROXY_API_KEY` whenever the published port is reachable by other machines.
 
 ## Other OpenAI-compatible gateways
 
@@ -180,6 +189,10 @@ KILO_BASE_URL=http://localhost:11434/v1 MODEL_PREFIX="" bun run start
 curl http://localhost:4181/health
 curl http://localhost:4181/version
 ```
+
+`/health` remains available for container health checks. When `PROXY_API_KEY` is
+set, `/version`, `/v1/models`, `/metrics`, `/dashboard`, and `/dashboard.json`
+require that key as well.
 
 ## Development
 
