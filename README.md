@@ -86,6 +86,28 @@ You can leave `KILO_API_KEY` empty and pass the key only via `ANTHROPIC_AUTH_TOK
 When `PROXY_API_KEY` is set, use it as `ANTHROPIC_AUTH_TOKEN` and keep the Kilo
 key in `KILO_API_KEY`.
 
+## 🤖 AI-assisted setup
+
+Want an LLM to do the steps above for you? Paste this prompt into Claude Code
+(or any AI coding agent) — it will install, configure, start, and verify the
+proxy automatically:
+
+```text
+Set up the claude-code-proxy repo on this machine so Claude Code can use Kilo
+and OpenCode Zen models through it. Do this end to end, then report the
+commands you ran and the results:
+
+1. Install Bun >= 1.0 if missing (macOS/Linux: curl -fsSL https://bun.sh/install | bash — Windows PowerShell: powershell -c "irm bun.sh/install.ps1 | iex").
+2. If the repo isn't here, clone https://github.com/sunil-gumatimath/claude-code-proxy.git, then run bun install.
+3. Create .env from .env.example and set KILO_API_KEY / OPENCODE_API_KEY — look for existing keys in my shell environment or Claude Code credentials before asking me for one.
+4. Start the proxy with bun run start and confirm http://127.0.0.1:4181/health returns {"status":"ok"}.
+5. Point Claude Code at it: ANTHROPIC_BASE_URL=http://localhost:4181, ANTHROPIC_AUTH_TOKEN=<the key>, ANTHROPIC_API_KEY="" (set these in the shell where claude runs).
+6. Verify end to end: POST a test message to http://127.0.0.1:4181/v1/messages (sync and stream) and confirm a valid Anthropic-format response, then run claude /logout and claude.
+7. Tell me anything I still need to do (e.g. provide an API key).
+
+Never print or commit API keys, and never commit .env.
+```
+
 ## Configuration
 
 | Env Variable | Default | Description |
