@@ -44,6 +44,31 @@ claude
 If `PROXY_API_KEY` is set, use that value for `ANTHROPIC_AUTH_TOKEN` and keep
 the upstream provider key in `.env`.
 
+## Set up with an LLM
+
+Paste this into Claude Code or another coding agent:
+
+```text
+Set up this claude-code-proxy repository so Claude Code can use Kilo Gateway or
+OpenCode Zen through it.
+
+1. Ensure Bun 1.0+ is installed and run `bun install`.
+2. Copy `.env.example` to `.env` if needed. Ask me for an API key; never print,
+   commit, or expose it.
+3. Start the proxy with `bun run start` and confirm
+   http://127.0.0.1:4181/health returns status "ok".
+4. Configure the current shell with:
+   ANTHROPIC_BASE_URL=http://127.0.0.1:4181
+   ANTHROPIC_AUTH_TOKEN=<proxy key or upstream key>
+   ANTHROPIC_API_KEY=""
+5. Send one small request to `/v1/messages` and report whether it succeeds.
+6. If upstream TLS verification fails, prefer `UPSTREAM_CA_FILE`; use
+   `UPSTREAM_TLS_REJECT_UNAUTHORIZED=false` only after explaining the risk.
+
+Report the commands run, the health-check result, and any remaining action I
+need to take.
+```
+
 ## Recommended free model
 
 ```env
