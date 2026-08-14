@@ -2,11 +2,12 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![Bun](https://img.shields.io/badge/runtime-Bun-black)](https://bun.sh)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
 **Use [Kilo Code](https://kilo.ai) and [OpenCode Zen](https://opencode.ai/docs/zen/) models with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).**
 
 Production-oriented local proxy that translates **Anthropic Messages API** ↔ **OpenAI Chat Completions** so Claude Code can use Kilo Gateway (or any OpenAI-compatible API).
+
+This is an open-source community project, released under the [MIT License](./LICENSE).
 
 ```
 Claude Code CLI  ──(Anthropic format)──▶  claude-code-proxy  ──▶ Kilo Gateway
@@ -232,10 +233,6 @@ Requests dynamically evaluate and iterate through candidate targets across both 
 - Chunks → `message_start` / `content_block_*` / `message_delta` / `message_stop`
 - `finish_reason: tool_calls` → `stop_reason: tool_use`
 - Stream always finalized if upstream closes early
-
-## Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## License
 

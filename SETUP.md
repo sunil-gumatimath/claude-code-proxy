@@ -306,7 +306,6 @@ echo $ANTHROPIC_AUTH_TOKEN
 ## Next steps
 
 - [README.md](./README.md) — features, config reference, architecture
-- [CONTRIBUTING.md](./CONTRIBUTING.md) — development and PRs
 - [SECURITY.md](./SECURITY.md) — security policy
 
 ```bash
