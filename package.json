@@ -36,8 +36,7 @@
     "src",
     "LICENSE",
     "README.md",
-    ".env.example",
-    "Dockerfile"
+    ".env.example"
   ],
   "devDependencies": {
     "bun-types": "latest",

@@ -29,7 +29,6 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-code-proxy  ──▶
 - Graceful shutdown (SIGINT / SIGTERM)
 - Debug logging with secret/base64 redaction
 - Zero runtime npm dependencies — [Bun](https://bun.sh) only
-- Docker image included
 - Comprehensive unit tests
 
 ## Requirements
@@ -37,7 +36,7 @@ Claude Code CLI  ──(Anthropic format)──▶  claude-code-proxy  ──▶
 - [Bun](https://bun.sh) ≥ 1.0
 - A [Kilo](https://kilo.ai) API key and/or an [OpenCode Zen](https://opencode.ai/docs/zen/) API key
 
-> **Full walkthrough:** see **[SETUP.md](./SETUP.md)** (install Bun, `.env`, Claude Code env vars, Docker, troubleshooting).
+> **Full walkthrough:** see **[SETUP.md](./SETUP.md)** (install Bun, `.env`, Claude Code env vars, and troubleshooting).
 
 ## Quick Start
 
@@ -163,20 +162,7 @@ src/
     messages.ts         # POST /v1/messages
 tests/
   translate.test.ts
-Dockerfile
 ```
-
-## Docker
-
-```bash
-docker build -t claude-code-proxy .
-docker run --rm -p 4181:4181 \
-  -e KILO_API_KEY=your-key \
-  claude-code-proxy
-```
-
-> Container sets `PROXY_HOST=0.0.0.0` so port publishing works. Keep the host firewall tight.
-> Set `PROXY_API_KEY` whenever the published port is reachable by other machines.
 
 ## Other OpenAI-compatible gateways
 

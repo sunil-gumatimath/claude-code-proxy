@@ -79,7 +79,7 @@ KILO_API_KEY=your-real-kilo-api-key-here
 | Variable | Default | When to change |
 |----------|---------|----------------|
 | `PROXY_PORT` | `4181` | Port already in use |
-| `PROXY_HOST` | `127.0.0.1` | Only for Docker / LAN (see security) |
+| `PROXY_HOST` | `127.0.0.1` | LAN access (see security) |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
 | `DEBUG` | `false` | `true` when troubleshooting |
@@ -201,29 +201,6 @@ claude
 4. Proxy logs should show `→` request and `←` response lines
 
 If Claude errors immediately, check [Troubleshooting](#troubleshooting).
-
----
-
-## Docker setup (optional)
-
-```bash
-docker build -t claude-code-proxy .
-
-docker run --rm -p 4181:4181 \
-  -e KILO_API_KEY=your-kilo-api-key \
-  claude-code-proxy
-```
-
-Windows PowerShell:
-
-```powershell
-docker build -t claude-code-proxy .
-docker run --rm -p 4181:4181 -e KILO_API_KEY=your-kilo-api-key claude-code-proxy
-```
-
-Then configure Claude Code the same way (`ANTHROPIC_BASE_URL=http://localhost:4181`).
-
-The image binds `0.0.0.0` inside the container so port publish works. Keep host firewall rules tight.
 
 ---
 
