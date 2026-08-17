@@ -43,45 +43,67 @@ claude
 If `PROXY_API_KEY` is set, use that value for `ANTHROPIC_AUTH_TOKEN` and keep
 the upstream provider key in `.env`.
 
+For a persistent setup via `~/.claude/settings.json`, see
+[Configure Claude Code](#configure-claude-code) below.
+
 ## Set up with an LLM
 
-Paste this into Claude Code or another coding agent:
+Paste this single-paragraph prompt into Claude Code or another coding agent:
 
 ```text
-Set up this claude-code-proxy repository so Claude Code can use Kilo Gateway or
-OpenCode Zen through it.
-
-1. Ensure Bun 1.0+ is installed and run `bun install`.
-2. Copy `.env.example` to `.env` if needed. Ask me for an API key; never print,
-   commit, or expose it.
-3. Start the proxy with `bun run start` and confirm
-   http://127.0.0.1:4181/health returns status "ok".
-4. Configure the current shell with:
-   ANTHROPIC_BASE_URL=http://127.0.0.1:4181
-   ANTHROPIC_AUTH_TOKEN=<proxy key or upstream key>
-   ANTHROPIC_API_KEY=""
-5. Send one small request to `/v1/messages` and report whether it succeeds.
-6. If upstream TLS verification fails, prefer `UPSTREAM_CA_FILE`; use
-   `UPSTREAM_TLS_REJECT_UNAUTHORIZED=false` only after explaining the risk.
-
-Report the commands run, the health-check result, and any remaining action I
-need to take.
+Set up this claude-code-proxy repository so Claude Code uses Kilo Gateway or
+OpenCode Zen through it: install Bun and run `bun install`, copy `.env.example`
+to `.env`, ask me for an API key (never print or expose it), start the proxy
+with `bun run start`, verify http://127.0.0.1:4181/health returns "ok", and
+configure `~/.claude/settings.json` per README's "Configure Claude Code"
+section. Prefer `UPSTREAM_CA_FILE` for TLS problems; use
+`UPSTREAM_TLS_REJECT_UNAUTHORIZED=false` only after explaining the risk. Confirm
+one small `/v1/messages` request succeeds and report anything I still need to do.
 ```
 
 ## Recommended free model
 
 ```env
-DEFAULT_MODEL=opencode/deepseek-v4-flash-free
+DEFAULT_MODEL=kilo/tencent/hy3:free
 ```
 
-The built-in routing chooses `kilo/stepfun/step-3.7-flash:free` for image
-requests. Set `FALLBACK_MODELS` to a comma-separated list of provider-qualified
-models to control fallback order.
+Hy3 (Tencent's 295B MoE) is the highest-benchmarked free coding model on
+Kilo. The built-in routing chooses `kilo/stepfun/step-3.7-flash:free` for image
+requests. Set `FALLBACK_MODELS` to a comma-separated list of
+provider-qualified models to control fallback order.
+
+## Configure Claude Code
+
+To make Claude Code use the proxy, set `~/.claude/settings.json` (create it if
+missing) so every session points at the proxy and the model you want:
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
+    "ANTHROPIC_AUTH_TOKEN": "local-proxy",
+    "ANTHROPIC_MODEL": "kilo/tencent/hy3:free",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  }
+}
+```
+
+Notes:
+
+- `ANTHROPIC_AUTH_TOKEN` is the value Claude Code sends to the proxy. If
+  `PROXY_API_KEY` is set, use that key here and keep the upstream provider key
+  in `.env`; otherwise use your upstream key (or any non-empty value if
+  `KILO_API_KEY` is set in `.env`).
+- `ANTHROPIC_MODEL` names the model Claude Code asks for. Use a
+  provider-qualified ID (e.g. `kilo/tencent/hy3:free`) to bypass the alias
+  table, or a `claude-*` name to let `MODEL_ALIASES` route it (e.g.
+  `*sonnet*` now maps to Hy3).
+- Restart Claude Code (or run `claude /logout`, then `claude`) after editing.
 
 ## Important settings
 
 | Setting | Default | Purpose |
-|---|---|---|
+| --- | --- | --- |
 | `PROXY_PORT` | `4181` | Local listen port |
 | `PROXY_HOST` | `127.0.0.1` | Bind address |
 | `PROXY_API_KEY` | unset | Client shared secret |
@@ -111,4 +133,6 @@ bun run typecheck
 
 The proxy binds to localhost by default. Do not expose it to an untrusted
 network; if you bind beyond localhost, set `PROXY_API_KEY` and restrict network
-access. Never commit `.env`.
+access. Operational endpoints (`/dashboard`, `/metrics`, `/v1/models`,
+`/version`) are only reachable from loopback when `PROXY_API_KEY` is unset,
+and require the key over any non-localhost host. Never commit `.env`.
