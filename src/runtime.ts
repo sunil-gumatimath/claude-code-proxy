@@ -169,3 +169,10 @@ export function getRuntime(config: Config) {
 	}
 	return { limiter: _limiter, cooldowns: _cooldowns as ModelCooldowns };
 }
+
+// Test-only helper: drop the memoized singletons so each test starts clean
+// (cooldowns and the request limiter otherwise persist across handleMessages calls).
+export function resetRuntimeForTests() {
+	_limiter = undefined;
+	_cooldowns = undefined;
+}
