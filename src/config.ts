@@ -66,28 +66,34 @@ export function loadConfig(): Config {
     opencodeApiKey: envStr("OPENCODE_API_KEY", ""),
     opencodeBaseUrl: envStr(
       "OPENCODE_BASE_URL",
-      "https://opencode.ai/zen/v1"
+      "https://opencode.ai/zen/v1",
     ).replace(/\/+$/, ""),
     proxyApiKey: envStr("PROXY_API_KEY", ""),
     kiloBaseUrl: envStr(
       "KILO_BASE_URL",
-      "https://api.kilo.ai/api/gateway"
+      "https://api.kilo.ai/api/gateway",
     ).replace(/\/+$/, ""),
     // Preserve Claude Code's requested model name unless the gateway requires a prefix.
     modelPrefix: Bun.env.MODEL_PREFIX ?? "",
-    defaultModel: envStr("DEFAULT_MODEL", "claude-sonnet-4-20250514"),
-    fallbackModels: (Bun.env.FALLBACK_MODELS ??
-      "kilo/poolside/laguna-s-2.1:free,kilo/cohere/north-mini-code:free,kilo/stepfun/step-3.7-flash:free,opencode/deepseek-v4-flash-free,opencode/longcat-2.0-free,opencode/laguna-s-2.1-free")
+    defaultModel: envStr("DEFAULT_MODEL", "kilo/tencent/hy3:free"),
+    fallbackModels: (
+      Bun.env.FALLBACK_MODELS ??
+      "opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,kilo/poolside/laguna-s-2.1:free,kilo/stepfun/step-3.7-flash:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/cohere/north-mini-code:free"
+    )
       .split(",")
       .map((model) => model.trim())
       .filter(Boolean),
-    allowedModels: (Bun.env.ALLOWED_MODELS ??
-      "opencode/deepseek-v4-flash-free,opencode/ling-3.0-flash-free,opencode/mimo-v2.5-free,opencode/north-mini-code-free,opencode/nemotron-3-ultra-free,opencode/laguna-s-2.1-free,opencode/longcat-2.0-free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/cohere/north-mini-code:free")
-      .split(",").map((model) => model.trim()).filter(Boolean),
+    allowedModels: (
+      Bun.env.ALLOWED_MODELS ??
+      "opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/mimo-v2.5-free,opencode/hy3-free,kilo/kilo-auto/free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/poolside/laguna-xs-2.1:free,kilo/cohere/north-mini-code:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/nvidia/nemotron-3-super-120b-a12b:free,kilo/nvidia/nemotron-3.5-lightning:free,kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,kilo/tencent/hy3:free,kilo/dots-studio/dots-3-note-preview:free,kilo/liquid/lfm-2.5-2.6b:free,kilo/openrouter/free"
+    )
+      .split(",")
+      .map((model) => model.trim())
+      .filter(Boolean),
     freeModelsOnly: envBool("FREE_MODELS_ONLY", true),
     modelAliases: parseAliases(
       Bun.env.MODEL_ALIASES ??
-        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=opencode/deepseek-v4-flash-free,*opus*=kilo/poolside/laguna-s-2.1:free"
+        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=kilo/tencent/hy3:free,*opus*=kilo/poolside/laguna-s-2.1:free",
     ),
     reasoningEffort: parseReasoningEffort(Bun.env.REASONING_EFFORT ?? ""),
     smartRouting: envBool("SMART_ROUTING", true),
@@ -96,7 +102,10 @@ export function loadConfig(): Config {
     modelCooldownMs: envInt("MODEL_COOLDOWN_MS", 30_000),
     debug: envBool("DEBUG", false),
     upstreamTimeoutMs: envInt("UPSTREAM_TIMEOUT_MS", 120_000),
-    upstreamTlsRejectUnauthorized: envBool("UPSTREAM_TLS_REJECT_UNAUTHORIZED", true),
+    upstreamTlsRejectUnauthorized: envBool(
+      "UPSTREAM_TLS_REJECT_UNAUTHORIZED",
+      true,
+    ),
     upstreamCaFile: envStr("UPSTREAM_CA_FILE", ""),
     maxBodyBytes: envInt("MAX_BODY_BYTES", 20 * 1024 * 1024), // 20 MB
     corsAllowedOrigins: (Bun.env.CORS_ALLOWED_ORIGINS ?? "")
