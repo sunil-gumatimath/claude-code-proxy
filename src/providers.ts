@@ -13,17 +13,32 @@ export interface ModelCapabilities {
 }
 
 const CAPABILITIES: Record<string, ModelCapabilities> = {
+  // OpenCode Zen Models
   "opencode/deepseek-v4-flash": { tools: true, vision: false },
   "opencode/deepseek-v4-flash-free": { tools: true, vision: false },
-  "opencode/ling-3.0-flash-free": { tools: true, vision: false },
-  "opencode/mimo-v2.5-free": { tools: true, vision: false },
-  "opencode/north-mini-code-free": { tools: true, vision: false },
-  "opencode/nemotron-3-ultra-free": { tools: true, vision: false },
   "opencode/laguna-s-2.1-free": { tools: true, vision: false },
+  "opencode/nemotron-3-ultra-free": { tools: true, vision: false },
+  "opencode/nemotron-3.5-lightning-free": { tools: true, vision: false },
+  "opencode/mimo-v2.5-free": { tools: true, vision: false },
+  "opencode/hy3-free": { tools: true, vision: false },
+  "opencode/ling-3.0-flash-free": { tools: true, vision: false },
+  "opencode/north-mini-code-free": { tools: true, vision: false },
   "opencode/longcat-2.0-free": { tools: true, vision: false },
+
+  // Kilo Gateway Models
+  "kilo/kilo-auto/free": { tools: true, vision: false },
   "kilo/stepfun/step-3.7-flash:free": { tools: true, vision: true },
   "kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false },
+  "kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false },
   "kilo/cohere/north-mini-code:free": { tools: true, vision: false },
+  "kilo/nvidia/nemotron-3-ultra-550b-a55b:free": { tools: true, vision: false },
+  "kilo/nvidia/nemotron-3-super-120b-a12b:free": { tools: true, vision: false },
+  "kilo/nvidia/nemotron-3.5-lightning:free": { tools: true, vision: false },
+  "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": { tools: true, vision: true },
+  "kilo/tencent/hy3:free": { tools: true, vision: false },
+  "kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true },
+  "kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false },
+  "kilo/openrouter/free": { tools: true, vision: true },
 };
 
 export function parseTarget(value: string, fallbackProvider: ProviderName = "kilo"): UpstreamTarget {
