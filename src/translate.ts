@@ -15,6 +15,8 @@ import type {
 	ReasoningEffort,
 } from "./types";
 
+import { anthropicErrorSse, extractErrorMessage, truncate } from "./errors";
+
 // ─── Request Translation (Anthropic → OpenAI) ──────────────────────────────
 
 export function translateRequest(
@@ -70,9 +72,13 @@ export function translateRequest(
 	} else if (body.thinking?.type === "enabled") {
 		const budget = body.thinking.budget_tokens ?? 0;
 		openai.reasoning_effort =
-			budget >= 32_000 ? "xhigh" :
-			budget >= 10_000 ? "high" :
-			budget >= 4_000 ? "medium" : "low";
+			budget >= 32_000
+				? "xhigh"
+				: budget >= 10_000
+					? "high"
+					: budget >= 4_000
+						? "medium"
+						: "low";
 	}
 
 	if (body.tools?.length) {
@@ -121,7 +127,8 @@ function translateMessage(
 		return [{ role, content: "" }];
 	}
 
-	if (role === "assistant") return translateAssistantMessage(msg.content, answeredToolIds);
+	if (role === "assistant")
+		return translateAssistantMessage(msg.content, answeredToolIds);
 	if (role === "user") return translateUserMessage(msg.content);
 
 	const text = msg.content
@@ -174,8 +181,7 @@ function translateAssistantMessage(
 				type: "function",
 				function: {
 					name: String(block.name),
-					arguments:
-						typeof input === "string" ? input : JSON.stringify(input ?? {}),
+					arguments: typeof input === "string" ? input : JSON.stringify(input ?? {}),
 				},
 			});
 		} else if (block.type === "thinking" && "thinking" in block) {
@@ -265,8 +271,7 @@ function translateUserMessage(
 			} else if (Array.isArray(content)) {
 				toolContent = content
 					.filter(
-						(b) =>
-							b && typeof b === "object" && "type" in b && b.type === "text",
+						(b) => b && typeof b === "object" && "type" in b && b.type === "text",
 					)
 					.map((b) => ("text" in b ? String(b.text) : ""))
 					.join("\n");
@@ -356,9 +361,7 @@ export function translateResponse(
 	if (!content.length) content.push({ type: "text", text: "" });
 
 	return {
-		id: openai.id
-			? `msg_${openai.id.replace(/^chatcmpl-/, "")}`
-			: `msg_${uid()}`,
+		id: openai.id ? `msg_${openai.id.replace(/^chatcmpl-/, "")}` : `msg_${uid()}`,
 		type: "message",
 		role: "assistant",
 		content,
@@ -429,6 +432,16 @@ export class StreamTranslator {
 			chunk = JSON.parse(data);
 		} catch {
 			return [];
+		}
+
+		// OpenAI-compatible gateways sometimes answer a 200 with an error object
+		// inside the stream body. Surface it as an Anthropic SSE error instead of
+		// a silent, empty success so the client never treats the turn as OK.
+		const maybeError = (chunk as { error?: { message?: unknown } }).error;
+		if (maybeError) {
+			const errMsg = extractErrorMessage(maybeError, "Upstream stream error");
+			this.finished = true;
+			return [anthropicErrorSse("api_error", truncate(errMsg, 2000))];
 		}
 
 		const events: string[] = [];

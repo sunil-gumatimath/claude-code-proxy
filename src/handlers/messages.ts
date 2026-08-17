@@ -7,7 +7,9 @@ import { extractApiKey } from "../auth";
 import {
 	anthropicError,
 	anthropicErrorSse,
+	extractErrorMessage,
 	mapUpstreamErrorType,
+	truncate,
 } from "../errors";
 import { colors, debug, error, log } from "../log";
 import {
@@ -48,11 +50,7 @@ export async function handleMessages(
 
 	try {
 		if (!isAuthorized(req, config.proxyApiKey)) {
-			return anthropicError(
-				401,
-				"authentication_error",
-				"Invalid proxy API key.",
-			);
+			return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 		}
 
 		const bodyText = await readBodyLimited(req, config.maxBodyBytes);
@@ -124,9 +122,7 @@ export async function handleMessages(
 				"No enabled free model supports this request's required capabilities.",
 			);
 		}
-		debug(
-			`Upstream candidates: ${enabledTargets.map(displayTarget).join(", ")}`,
-		);
+		debug(`Upstream candidates: ${enabledTargets.map(displayTarget).join(", ")}`);
 
 		let controller!: AbortController;
 		let abortUpstream!: () => void;
@@ -149,7 +145,8 @@ export async function handleMessages(
 		for (let attempt = 0; attempt < targets.length; attempt++) {
 			const target = targets[attempt];
 			const provider = getProvider(config, target.provider);
-			const apiKey = provider.apiKey ||
+			const apiKey =
+				provider.apiKey ||
 				(target.provider === requestedTarget.provider ? requestApiKey : "");
 			if (!apiKey) continue;
 			openaiBody.model = qualifyModel(target, config);
@@ -157,10 +154,7 @@ export async function handleMessages(
 			controller = new AbortController();
 			abortUpstream = () => controller.abort("Client disconnected");
 			req.signal.addEventListener("abort", abortUpstream, { once: true });
-			const timer = setTimeout(
-				() => controller.abort(),
-				config.upstreamTimeoutMs,
-			);
+			const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
 
 			try {
 				const response = await fetch(`${provider.baseUrl}/chat/completions`, {
@@ -212,17 +206,14 @@ export async function handleMessages(
 				req.signal.removeEventListener("abort", abortUpstream);
 				error(`Upstream ${response.status}: ${errText.slice(0, 200)}`);
 				return anthropicError(
-					response.status >= 400 && response.status < 600
-						? response.status
-						: 502,
+					response.status >= 400 && response.status < 600 ? response.status : 502,
 					mapUpstreamErrorType(response.status),
 					`Upstream returned ${response.status}: ${truncate(errText, 2000)}`,
 				);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				const isAbort =
-					(err instanceof Error && err.name === "AbortError") ||
-					/abort/i.test(msg);
+					(err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
 				if (isAbort && req.signal.aborted) {
 					req.signal.removeEventListener("abort", abortUpstream);
 					return anthropicError(
@@ -260,11 +251,7 @@ export async function handleMessages(
 					continue;
 				}
 				req.signal.removeEventListener("abort", abortUpstream);
-				return anthropicError(
-					502,
-					"api_error",
-					`Failed to reach upstream: ${msg}`,
-				);
+				return anthropicError(502, "api_error", `Failed to reach upstream: ${msg}`);
 			} finally {
 				clearTimeout(timer);
 			}
@@ -272,11 +259,7 @@ export async function handleMessages(
 
 		if (!upstreamRes) {
 			req.signal.removeEventListener("abort", abortUpstream);
-			return anthropicError(
-				502,
-				"api_error",
-				"No upstream model was available.",
-			);
+			return anthropicError(502, "api_error", "No upstream model was available.");
 		}
 
 		if (isStream) {
@@ -367,8 +350,23 @@ async function handleSync(
 	startTime: number,
 	requestId: string,
 ): Promise<Response> {
-	const openaiResult = (await kiloRes.json()) as OpenAIChatResponse;
+	const openaiResult = (await kiloRes.json()) as OpenAIChatResponse & {
+		error?: { message?: unknown };
+	};
 	debug("OpenAI response", openaiResult);
+
+	// Some gateways answer HTTP 200 with an error object in the body. Without
+	// this check the proxy would forward a fabricated empty completion.
+	const upstreamErr = openaiResult.error;
+	if (upstreamErr) {
+		const errMsg = extractErrorMessage(upstreamErr, "Upstream returned an error");
+		error(`Upstream error: ${errMsg.slice(0, 200)}`);
+		return anthropicError(
+			502,
+			"api_error",
+			`Upstream error: ${truncate(errMsg, 2000)}`,
+		);
+	}
 
 	const anthropicResult = translateResponse(openaiResult, model);
 	const elapsed = (performance.now() - startTime).toFixed(0);
@@ -626,7 +624,10 @@ export function buildCandidateTargets(
 	];
 }
 
-export function isTargetAllowed(target: UpstreamTarget, config: Config): boolean {
+export function isTargetAllowed(
+	target: UpstreamTarget,
+	config: Config,
+): boolean {
 	const id = displayTarget(target);
 	const explicitlyAllowed = config.allowedModels.includes(id);
 	// FREE_MODELS_ONLY rejects paid models unless the operator has explicitly
@@ -681,8 +682,4 @@ async function readBodyLimited(
 		offset += c.byteLength;
 	}
 	return decoder.decode(merged);
-}
-
-function truncate(s: string, n: number): string {
-	return s.length <= n ? s : s.slice(0, n) + "…";
 }

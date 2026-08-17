@@ -3,7 +3,7 @@ import type { AnthropicErrorBody } from "./types";
 export function anthropicError(
   status: number,
   type: string,
-  message: string
+  message: string,
 ): Response {
   const body: AnthropicErrorBody = {
     type: "error",
@@ -33,4 +33,24 @@ export function anthropicErrorSse(type: string, message: string): string {
     error: { type, message },
   };
   return `event: error\ndata: ${JSON.stringify(payload)}\n\n`;
+}
+
+/**
+ * Extract a human-readable message from an upstream error value. Handles the
+ * common `{ error: { message } }` shape as well as non-object / message-less
+ * payloads, falling back to a caller-supplied default.
+ */
+export function extractErrorMessage(err: unknown, fallback: string): string {
+  if (
+    err &&
+    typeof err === "object" &&
+    typeof (err as { message?: unknown }).message === "string"
+  ) {
+    return (err as { message: string }).message;
+  }
+  return fallback;
+}
+
+export function truncate(s: string, n: number): string {
+  return s.length <= n ? s : s.slice(0, n) + "…";
 }
