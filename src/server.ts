@@ -157,9 +157,29 @@ function corsHeaders(req: Request, config: Config): Record<string, string> {
 }
 
 function requireOperationalAuth(req: Request, config: Config): Response | undefined {
-  return isAuthorized(req, config.proxyApiKey)
-    ? undefined
-    : anthropicError(401, "authentication_error", "Invalid proxy API key.");
+	// When a proxy key is configured it is always required — localhost or not.
+	if (config.proxyApiKey) {
+		return isAuthorized(req, config.proxyApiKey)
+			? undefined
+			: anthropicError(401, "authentication_error", "Invalid proxy API key.");
+	}
+	// No proxy key: keep operational endpoints open on loopback for local use,
+	// but lock them down when reached through any non-localhost host (e.g. a LAN
+	// IP) so they aren't world-readable if the proxy is ever exposed.
+	const host = new URL(req.url).hostname;
+	const loopback =
+		host === "localhost" ||
+		host === "127.0.0.1" ||
+		host === "::1" ||
+		host === "[::1]";
+	if (!loopback) {
+		return anthropicError(
+			401,
+			"authentication_error",
+			"Set PROXY_API_KEY to access operational endpoints over the network.",
+		);
+	}
+	return undefined;
 }
 
 function withCors(res: Response, req: Request, config: Config): Response {
