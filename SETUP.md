@@ -82,6 +82,9 @@ KILO_API_KEY=your-real-kilo-api-key-here
 | `PROXY_HOST` | `127.0.0.1` | LAN access (see security) |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
+| `DEFAULT_MODEL` | `kilo/poolside/laguna-s-2.1:free` | Pick a different primary model |
+| `FALLBACK_MODELS` | Laguna → Hy3 → others | Control fallback order after upstream failures |
+| `REASONING_EFFORT` | *(empty)* | Set `low`/`medium`/`high` to force upstream reasoning; leave empty unless a model feels too slow |
 | `DEBUG` | `false` | `true` when troubleshooting |
 
 > **Never commit `.env`.** It is gitignored. Only share `.env.example`.
@@ -243,6 +246,8 @@ bun run start
 | Upstream 401 / 403 | Invalid Kilo key — regenerate at kilo.ai |
 | Upstream timeout | Increase `UPSTREAM_TIMEOUT_MS` (e.g. `300000`) |
 | Model not found | Check `MODEL_PREFIX` and model name Kilo expects |
+| Feels slow | Clear `REASONING_EFFORT` in `.env` (forced high reasoning slows every request); switch to a faster model |
+| "not a model this version of Claude Code recognizes" | Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's real window (Laguna = `262144`) so auto-compact doesn't assume 200K |
 | Need more logs | Set `DEBUG=true` in `.env` and restart proxy |
 
 ### Enable debug mode
