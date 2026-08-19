@@ -64,13 +64,16 @@ one small `/v1/messages` request succeeds and report anything I still need to do
 ## Recommended free model
 
 ```env
-DEFAULT_MODEL=kilo/tencent/hy3:free
+DEFAULT_MODEL=kilo/poolside/laguna-s-2.1:free
 ```
 
-Hy3 (Tencent's 295B MoE) is the highest-benchmarked free coding model on
-Kilo. The built-in routing chooses `kilo/stepfun/step-3.7-flash:free` for image
-requests. Set `FALLBACK_MODELS` to a comma-separated list of
-provider-qualified models to control fallback order.
+Laguna S 2.1 (Poolside's 118B agentic coding model, 8B active) is the fastest
+capable free coding model on Kilo, scoring 70.2% on Terminal-Bench 2.1. The
+built-in routing chooses `kilo/stepfun/step-3.7-flash:free` for image requests.
+Set `FALLBACK_MODELS` to a comma-separated list of provider-qualified models to
+control fallback order — the default puts `kilo/tencent/hy3:free` (Tencent's
+295B MoE, the highest-benchmarked free model) first so it catches rate-limits
+and failures from the primary.
 
 ## Configure Claude Code
 
@@ -82,7 +85,8 @@ missing) so every session points at the proxy and the model you want:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/tencent/hy3:free",
+    "ANTHROPIC_MODEL": "kilo/poolside/laguna-s-2.1:free",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   }
 }
@@ -95,9 +99,11 @@ Notes:
   in `.env`; otherwise use your upstream key (or any non-empty value if
   `KILO_API_KEY` is set in `.env`).
 - `ANTHROPIC_MODEL` names the model Claude Code asks for. Use a
-  provider-qualified ID (e.g. `kilo/tencent/hy3:free`) to bypass the alias
-  table, or a `claude-*` name to let `MODEL_ALIASES` route it (e.g.
-  `*sonnet*` now maps to Hy3).
+  provider-qualified ID (e.g. `kilo/poolside/laguna-s-2.1:free`) to bypass the
+  alias table, or a `claude-*` name to let `MODEL_ALIASES` route it (e.g.
+  `*sonnet*` now maps to Laguna). `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude
+  Code the model's real window (262K) so auto-compact doesn't assume 200K for
+  unrecognized model IDs.
 - Restart Claude Code (or run `claude /logout`, then `claude`) after editing.
 
 ## Important settings
