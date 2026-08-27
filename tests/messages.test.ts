@@ -41,6 +41,7 @@ const defaultConfig: Config = {
 		"kilo/stepfun/step-3.7-flash:free",
 		"kilo/poolside/laguna-s-2.1:free",
 		"kilo/cohere/north-mini-code:free",
+		"kilo/stealth/ox-alpha",
 	],
 	freeModelsOnly: true,
 	modelAliases: [
@@ -196,6 +197,12 @@ describe("isTargetAllowed", () => {
 		expect(
 			isTargetAllowed(
 				{ provider: "opencode", model: "laguna-s-2.1-free" },
+				cfg,
+			),
+		).toBe(true);
+		expect(
+			isTargetAllowed(
+				{ provider: "kilo", model: "stealth/ox-alpha" },
 				cfg,
 			),
 		).toBe(true);

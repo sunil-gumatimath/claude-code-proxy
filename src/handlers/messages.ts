@@ -31,6 +31,7 @@ import {
 	getCapabilities,
 	getProvider,
 	isFreeTarget,
+	normalizeReasoningEffort,
 	parseTarget,
 	providerEnabled,
 	qualifyModel,
@@ -148,8 +149,18 @@ export async function handleMessages(
 			const apiKey =
 				provider.apiKey ||
 				(target.provider === requestedTarget.provider ? requestApiKey : "");
-			if (!apiKey) continue;
 			openaiBody.model = qualifyModel(target, config);
+			const targetEffort = normalizeReasoningEffort(
+				target,
+				openaiBody.reasoning_effort,
+			);
+			const payload = {
+				...openaiBody,
+				...(targetEffort ? { reasoning_effort: targetEffort } : {}),
+			};
+			if (!targetEffort && "reasoning_effort" in payload) {
+				delete (payload as { reasoning_effort?: unknown }).reasoning_effort;
+			}
 			recordModelRequest(displayTarget(target));
 			controller = new AbortController();
 			abortUpstream = () => controller.abort("Client disconnected");
@@ -163,7 +174,7 @@ export async function handleMessages(
 						"Content-Type": "application/json",
 						Authorization: `Bearer ${apiKey}`,
 					},
-					body: JSON.stringify(openaiBody),
+					body: JSON.stringify(payload),
 					signal: controller.signal,
 					tls:
 						config.upstreamTlsRejectUnauthorized && !config.upstreamCaFile
