@@ -26,6 +26,8 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
   "opencode/longcat-2.0-free": { tools: true, vision: false },
 
   // Kilo Gateway Models
+  "kilo/stealth/ox-alpha": { tools: true, vision: true },
+  "kilo/stealth/ox-alpha:free": { tools: true, vision: true },
   "kilo/kilo-auto/free": { tools: true, vision: false },
   "kilo/stepfun/step-3.7-flash:free": { tools: true, vision: true },
   "kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false },
@@ -83,7 +85,10 @@ export function displayTarget(target: UpstreamTarget): string {
 export function isFreeTarget(target: UpstreamTarget): boolean {
   return target.provider === "opencode"
     ? target.model.endsWith("-free")
-    : target.model.endsWith(":free") || target.model === "kilo-auto/free";
+    : target.model.endsWith(":free") ||
+        target.model.endsWith("-free") ||
+        target.model === "kilo-auto/free" ||
+        target.model === "stealth/ox-alpha";
 }
 
 /**
@@ -103,3 +108,23 @@ export function getCapabilities(target: UpstreamTarget): ModelCapabilities {
   // to support Claude Code tools or image input.
   return CAPABILITIES[displayTarget(target)] ?? { tools: false, vision: false };
 }
+
+/**
+ * Adapt reasoning_effort to upstream requirements.
+ * Tencent Hy3 strictly accepts only "no_think", "low", or "high".
+ */
+export function normalizeReasoningEffort(
+  target: UpstreamTarget,
+  effort?: string,
+): string | undefined {
+  if (!effort) return undefined;
+  const isHy3 = target.model.toLowerCase().includes("hy3");
+  if (isHy3) {
+    if (effort === "max" || effort === "xhigh" || effort === "high") return "high";
+    if (effort === "medium" || effort === "low") return "low";
+    if (effort === "no_think") return "no_think";
+    return "high";
+  }
+  return effort;
+}
+
