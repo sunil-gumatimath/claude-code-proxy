@@ -53,7 +53,9 @@ export function translateRequest(
 	}
 	openai.messages = messages;
 
-	if (body.max_tokens != null) openai.max_tokens = body.max_tokens;
+	if (body.max_tokens != null) {
+		openai.max_tokens = Math.min(body.max_tokens, 16384);
+	}
 	if (body.temperature != null) openai.temperature = body.temperature;
 	if (body.top_p != null) openai.top_p = body.top_p;
 	if (body.stop_sequences) openai.stop = body.stop_sequences;
