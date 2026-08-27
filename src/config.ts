@@ -78,14 +78,14 @@ export function loadConfig(): Config {
     defaultModel: envStr("DEFAULT_MODEL", "kilo/tencent/hy3:free"),
     fallbackModels: (
       Bun.env.FALLBACK_MODELS ??
-      "opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,kilo/poolside/laguna-s-2.1:free,kilo/stepfun/step-3.7-flash:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/cohere/north-mini-code:free"
+      "kilo/poolside/laguna-s-2.1:free,opencode/hy3-free,opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,kilo/stepfun/step-3.7-flash:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/cohere/north-mini-code:free"
     )
       .split(",")
       .map((model) => model.trim())
       .filter(Boolean),
     allowedModels: (
       Bun.env.ALLOWED_MODELS ??
-      "opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/mimo-v2.5-free,opencode/hy3-free,kilo/kilo-auto/free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/poolside/laguna-xs-2.1:free,kilo/cohere/north-mini-code:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/nvidia/nemotron-3-super-120b-a12b:free,kilo/nvidia/nemotron-3.5-lightning:free,kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,kilo/tencent/hy3:free,kilo/dots-studio/dots-3-note-preview:free,kilo/liquid/lfm-2.5-2.6b:free,kilo/openrouter/free"
+      "kilo/stealth/ox-alpha,kilo/stealth/ox-alpha:free,opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/mimo-v2.5-free,opencode/hy3-free,kilo/kilo-auto/free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/poolside/laguna-xs-2.1:free,kilo/cohere/north-mini-code:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/nvidia/nemotron-3-super-120b-a12b:free,kilo/nvidia/nemotron-3.5-lightning:free,kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,kilo/tencent/hy3:free,kilo/dots-studio/dots-3-note-preview:free,kilo/liquid/lfm-2.5-2.6b:free,kilo/openrouter/free"
     )
       .split(",")
       .map((model) => model.trim())
@@ -93,7 +93,7 @@ export function loadConfig(): Config {
     freeModelsOnly: envBool("FREE_MODELS_ONLY", true),
     modelAliases: parseAliases(
       Bun.env.MODEL_ALIASES ??
-        "*haiku*=kilo/stepfun/step-3.7-flash:free,*sonnet*=kilo/tencent/hy3:free,*opus*=kilo/poolside/laguna-s-2.1:free",
+        "*haiku*=kilo/tencent/hy3:free,*sonnet*=kilo/tencent/hy3:free,*opus*=kilo/tencent/hy3:free",
     ),
     reasoningEffort: parseReasoningEffort(Bun.env.REASONING_EFFORT ?? ""),
     smartRouting: envBool("SMART_ROUTING", true),
@@ -121,6 +121,7 @@ const REASONING_EFFORTS: Record<string, true> = {
   high: true,
   xhigh: true,
   max: true,
+  no_think: true,
 };
 
 function parseReasoningEffort(raw: string): ReasoningEffort {
