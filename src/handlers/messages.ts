@@ -1,7 +1,7 @@
 // ============================================================================
 // handlers/messages.ts — POST /v1/messages
 // ============================================================================
-
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { Config } from "../config";
 import { extractApiKey } from "../auth";
 import {
@@ -128,13 +128,24 @@ export async function handleMessages(
 		let controller!: AbortController;
 		let abortUpstream!: () => void;
 		const runtime = getRuntime(config);
-		releaseSlot = await runtime.limiter.acquire();
+		if (req.signal.aborted) {
+			return anthropicError(499, "api_error", "Client disconnected.");
+		}
+		releaseSlot = await runtime.limiter.acquire(req.signal);
 		if (!releaseSlot) {
+			if (req.signal.aborted) {
+				return anthropicError(499, "api_error", "Client disconnected.");
+			}
 			return anthropicError(
 				429,
 				"rate_limit_error",
 				"Proxy is busy; try again shortly.",
 			);
+		}
+		if (req.signal.aborted) {
+			releaseSlot();
+			releaseSlot = undefined;
+			return anthropicError(499, "api_error", "Client disconnected.");
 		}
 
 		const cooled = enabledTargets.filter(
@@ -289,6 +300,7 @@ export async function handleMessages(
 					streamRelease?.();
 					streamFinish?.();
 				},
+				config.maxBodyBytes,
 			);
 		}
 		try {
@@ -326,33 +338,52 @@ export async function handleCountTokens(
 	if (!isAuthorized(req, config.proxyApiKey)) {
 		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
-	let bodyText: string;
-	try {
-		bodyText = await readBodyLimited(req, config.maxBodyBytes);
-	} catch (err) {
-		if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
-			return anthropicError(
-				413,
-				"invalid_request_error",
-				`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
-			);
-		}
-		throw err;
+	const runtime = getRuntime(config);
+	if (req.signal.aborted) {
+		return anthropicError(499, "api_error", "Client disconnected.");
 	}
-	try {
-		JSON.parse(bodyText);
-	} catch {
+	const releaseSlot = await runtime.limiter.acquire(req.signal);
+	if (!releaseSlot) {
+		if (req.signal.aborted) {
+			return anthropicError(499, "api_error", "Client disconnected.");
+		}
 		return anthropicError(
-			400,
-			"invalid_request_error",
-			"Request body must be valid JSON.",
+			429,
+			"rate_limit_error",
+			"Proxy is busy; try again shortly.",
 		);
 	}
-	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
-	return Response.json(
-		{ input_tokens: inputTokens },
-		{ headers: { "Cache-Control": "no-store" } },
-	);
+	try {
+		let bodyText: string;
+		try {
+			bodyText = await readBodyLimited(req, config.maxBodyBytes);
+		} catch (err) {
+			if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
+				return anthropicError(
+					413,
+					"invalid_request_error",
+					`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
+				);
+			}
+			throw err;
+		}
+		try {
+			JSON.parse(bodyText);
+		} catch {
+			return anthropicError(
+				400,
+				"invalid_request_error",
+				"Request body must be valid JSON.",
+			);
+		}
+		const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
+		return Response.json(
+			{ input_tokens: inputTokens },
+			{ headers: { "Cache-Control": "no-store" } },
+		);
+	} finally {
+		releaseSlot();
+	}
 }
 
 async function handleSync(
@@ -405,6 +436,7 @@ function handleStream(
 	requestId: string,
 	upstreamController: AbortController,
 	cleanup: () => void,
+	maxBodyBytes = 20 * 1024 * 1024,
 ): Response {
 	const translator = new StreamTranslator(model);
 	const encoder = new TextEncoder();
@@ -467,9 +499,11 @@ function handleStream(
 					if (done || canceled) break;
 
 					buffer += decoder.decode(value, { stream: true });
+					if (buffer.length > maxBodyBytes) {
+						throw new Error(`SSE stream chunk buffer exceeded maximum size of ${maxBodyBytes} bytes`);
+					}
 					const lines = buffer.split("\n");
 					buffer = lines.pop() || "";
-
 					for (const line of lines) {
 						if (canceled) break;
 						const trimmed = line.trim();
@@ -519,9 +553,6 @@ function handleStream(
 					controller,
 					encoder.encode(anthropicErrorSse("api_error", msg)),
 				);
-				for (const ev of translator.finalize("stop")) {
-					safeEnqueue(controller, encoder.encode(ev));
-				}
 				safeClose(controller);
 			} finally {
 				onceCleanup();
@@ -549,11 +580,10 @@ function handleStream(
 export function isAuthorized(req: Request, expectedKey: string): boolean {
 	if (!expectedKey) return true;
 	const supplied = req.headers.get("x-proxy-api-key") || extractApiKey(req);
-	if (supplied.length !== expectedKey.length) return false;
-	let mismatch = 0;
-	for (let i = 0; i < supplied.length; i++)
-		mismatch |= supplied.charCodeAt(i) ^ expectedKey.charCodeAt(i);
-	return mismatch === 0;
+	if (!supplied) return false;
+	const suppliedHash = createHash("sha256").update(supplied, "utf8").digest();
+	const expectedHash = createHash("sha256").update(expectedKey, "utf8").digest();
+	return timingSafeEqual(suppliedHash, expectedHash);
 }
 
 export function canFallback(
@@ -650,7 +680,7 @@ export function isTargetAllowed(
 
 export function globMatches(pattern: string, value: string): boolean {
 	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\]/g, "\\$&")
+		.replace(/[.+^${}()|[\]\\?]/g, "\\$&")
 		.replace(/\*/g, ".*");
 	return new RegExp(`^${escaped}$`, "i").test(value);
 }

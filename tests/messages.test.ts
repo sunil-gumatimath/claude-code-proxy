@@ -10,6 +10,12 @@ import {
 } from "../src/handlers/messages";
 import type { AnthropicMessagesRequest } from "../src/types";
 import { qualifyModel } from "../src/providers";
+import {
+	RequestLimiter,
+	prometheusMetrics,
+	recordModelRequest,
+	resetRuntimeForTests,
+} from "../src/runtime";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -458,5 +464,86 @@ describe("qualifyModel", () => {
 				request(),
 			),
 		).toBe("stepfun/step-3.7-flash:free");
+	});
+});
+
+// ── isAuthorized & Security ──────────────────────────────────────────────────
+
+describe("isAuthorized", () => {
+	test("returns true when expectedKey is empty", () => {
+		const req = new Request("http://localhost/v1/messages");
+		expect(isAuthorized(req, "")).toBe(true);
+	});
+
+	test("authorizes with matching x-proxy-api-key", () => {
+		const req = new Request("http://localhost/v1/messages", {
+			headers: { "x-proxy-api-key": "secret-123" },
+		});
+		expect(isAuthorized(req, "secret-123")).toBe(true);
+	});
+
+	test("authorizes with matching Authorization: Bearer header", () => {
+		const req = new Request("http://localhost/v1/messages", {
+			headers: { authorization: "Bearer secret-123" },
+		});
+		expect(isAuthorized(req, "secret-123")).toBe(true);
+	});
+
+	test("rejects mismatched key of same or different length", () => {
+		const req1 = new Request("http://localhost/v1/messages", {
+			headers: { "x-proxy-api-key": "secret-124" },
+		});
+		expect(isAuthorized(req1, "secret-123")).toBe(false);
+
+		const req2 = new Request("http://localhost/v1/messages", {
+			headers: { "x-proxy-api-key": "short" },
+		});
+		expect(isAuthorized(req2, "secret-123")).toBe(false);
+	});
+});
+
+// ── globMatches ─────────────────────────────────────────────────────────────
+
+describe("globMatches", () => {
+	test("matches standard glob wildcards", () => {
+		expect(globMatches("*haiku*", "claude-3-5-haiku-latest")).toBe(true);
+		expect(globMatches("*opus*", "claude-3-opus-20240229")).toBe(true);
+		expect(globMatches("*sonnet*", "gpt-4o")).toBe(false);
+	});
+
+	test("safely handles patterns containing question marks and special regex chars", () => {
+		expect(globMatches("model-?-v1", "model-?-v1")).toBe(true);
+		expect(globMatches("model+[a-z]*", "model+[a-z]test")).toBe(true);
+	});
+});
+
+// ── RequestLimiter & AbortSignal ────────────────────────────────────────────
+
+describe("RequestLimiter", () => {
+	test("aborts queued item when AbortSignal fires", async () => {
+		const limiter = new RequestLimiter(1, 2);
+		const release1 = await limiter.acquire();
+		expect(release1).toBeDefined();
+
+		const controller = new AbortController();
+		const queuePromise = limiter.acquire(controller.signal);
+
+		controller.abort();
+		const result = await queuePromise;
+		expect(result).toBeUndefined();
+
+		release1?.();
+	});
+});
+
+// ── Prometheus Metrics ──────────────────────────────────────────────────────
+
+describe("prometheusMetrics", () => {
+	test("formats Prometheus metrics with latency and escaped labels", () => {
+		recordModelRequest("test\rprovider/test\nmodel");
+		const out = prometheusMetrics();
+		expect(out).toContain("kilo_proxy_request_duration_ms_total");
+		expect(out).toContain("kilo_proxy_requests_total");
+		expect(out).not.toContain("\r");
 	});
 });

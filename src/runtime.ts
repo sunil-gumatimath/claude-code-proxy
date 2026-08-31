@@ -80,6 +80,9 @@ export function prometheusMetrics(): string {
 			"# HELP kilo_proxy_rate_limits_total Upstream rate-limit responses.",
 			"# TYPE kilo_proxy_rate_limits_total counter",
 			`kilo_proxy_rate_limits_total ${m.rateLimitsTotal}`,
+			"# HELP kilo_proxy_request_duration_ms_total Total request duration in milliseconds.",
+			"# TYPE kilo_proxy_request_duration_ms_total counter",
+			`kilo_proxy_request_duration_ms_total ${m.totalLatencyMs}`,
 			"# HELP kilo_proxy_model_requests_total Upstream attempts by provider and model.",
 			"# TYPE kilo_proxy_model_requests_total counter",
 			...Object.entries(m.modelRequests).map(([model, count]) => {
@@ -91,7 +94,11 @@ export function prometheusMetrics(): string {
 }
 
 function escapePrometheusLabel(value: string): string {
-	return value.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/"/g, '\\"');
+	return value
+		.replace(/\\/g, "\\\\")
+		.replace(/\n/g, "\\n")
+		.replace(/\r/g, "\\r")
+		.replace(/"/g, '\\"');
 }
 
 export class RequestLimiter {
@@ -103,16 +110,36 @@ export class RequestLimiter {
 		private readonly maxQueue: number,
 	) {}
 
-	acquire(): Promise<(() => void) | undefined> {
+	acquire(signal?: AbortSignal): Promise<(() => void) | undefined> {
+		if (signal?.aborted) return Promise.resolve(undefined);
 		if (this.active < this.maxConcurrent) return Promise.resolve(this.lease());
 		if (this.queue.length >= this.maxQueue) return Promise.resolve(undefined);
 		metrics.queuedRequests++;
-		return new Promise((resolve) => {
-			this.queue.push((release) => {
-				metrics.queuedRequests--;
+		const { promise, resolve } = Promise.withResolvers<(() => void) | undefined>();
+		let entry: ((release: () => void) => void) | null = null;
+		const onAbort = () => {
+			if (entry) {
+				const idx = this.queue.indexOf(entry);
+				if (idx !== -1) {
+					this.queue.splice(idx, 1);
+					metrics.queuedRequests--;
+				}
+			}
+			resolve(undefined);
+		};
+		entry = (release) => {
+			metrics.queuedRequests--;
+			signal?.removeEventListener("abort", onAbort);
+			if (signal?.aborted) {
+				release();
+				resolve(undefined);
+			} else {
 				resolve(release);
-			});
-		});
+			}
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+		this.queue.push(entry);
+		return promise;
 	}
 
 	private lease(): () => void {

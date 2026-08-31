@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { handleMessages } from "../src/handlers/messages";
+import { createServer } from "../src/server";
 import type { Config } from "../src/config";
 import { resetRuntimeForTests } from "../src/runtime";
-
 const baseConfig: Config = {
   host: "127.0.0.1",
   port: 4181,
@@ -231,5 +231,31 @@ describe("handleMessages — streaming", () => {
     const out = await collectStream(res);
     expect(out).toContain("event: error");
     expect(out).toContain("stream boom");
+  });
+});
+
+describe("createServer routing & security", () => {
+  test("returns 404 with not_found_error type for unknown routes", async () => {
+    const server = createServer(baseConfig);
+    const res = await server.fetch(new Request("http://127.0.0.1:4181/unknown-endpoint"));
+    server.stop(true);
+    expect(res.status).toBe(404);
+    const json = (await res.json()) as { error: { type: string } };
+    expect(json.error.type).toBe("not_found_error");
+  });
+
+  test("CORS preflight includes x-proxy-api-key in allowed headers", async () => {
+    const cfg: Config = { ...baseConfig, corsAllowedOrigins: ["http://localhost:3000"] };
+    const server = createServer(cfg);
+    const res = await server.fetch(
+      new Request("http://127.0.0.1:4181/v1/messages", {
+        method: "OPTIONS",
+        headers: { origin: "http://localhost:3000" },
+      }),
+    );
+    server.stop(true);
+    expect(res.status).toBe(204);
+    const headers = res.headers.get("access-control-allow-headers") ?? "";
+    expect(headers).toContain("x-proxy-api-key");
   });
 });
