@@ -2,6 +2,7 @@
 // server.ts — HTTP server (routing + lifecycle)
 // ============================================================================
 
+import type { Server } from "bun";
 import type { Config } from "./config";
 import { anthropicError } from "./errors";
 import { handleCountTokens, handleMessages, isAuthorized } from "./handlers/messages";
@@ -17,8 +18,8 @@ export function createServer(config: Config) {
   const server = Bun.serve({
     hostname: config.host,
     port: config.port,
+    maxRequestBodySize: config.maxBodyBytes,
     idleTimeout: 255, // max allowed by Bun (seconds) for long streams
-
     async fetch(req: Request): Promise<Response> {
       const url = new URL(req.url);
 
@@ -54,7 +55,7 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/version") {
-        const denied = requireOperationalAuth(req, config);
+        const denied = requireOperationalAuth(req, config, server);
         if (denied) return withCors(denied, req, config);
         return Response.json(
           { name: NAME, version: VERSION },
@@ -63,7 +64,7 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/v1/models") {
-        const denied = requireOperationalAuth(req, config);
+        const denied = requireOperationalAuth(req, config, server);
         if (denied) return withCors(denied, req, config);
         const models = [...new Set([
           ...config.allowedModels,
@@ -85,7 +86,7 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/metrics") {
-        const denied = requireOperationalAuth(req, config);
+        const denied = requireOperationalAuth(req, config, server);
         if (denied) return withCors(denied, req, config);
         return new Response(prometheusMetrics(), {
           headers: {
@@ -97,7 +98,7 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard") {
-        const denied = requireOperationalAuth(req, config);
+        const denied = requireOperationalAuth(req, config, server);
         if (denied) return withCors(denied, req, config);
         return new Response(dashboardHtml(), {
           headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...corsHeaders(req, config) },
@@ -105,7 +106,7 @@ export function createServer(config: Config) {
       }
 
       if (req.method === "GET" && url.pathname === "/dashboard.json") {
-        const denied = requireOperationalAuth(req, config);
+        const denied = requireOperationalAuth(req, config, server);
         if (denied) return withCors(denied, req, config);
         return Response.json(getMetrics(), { headers: { "Cache-Control": "no-store", ...corsHeaders(req, config) } });
       }
@@ -124,7 +125,7 @@ export function createServer(config: Config) {
 
       return anthropicError(
         404,
-        "not_found",
+        "not_found_error",
         `Unknown route: ${req.method} ${url.pathname}`
       );
     },
@@ -150,22 +151,42 @@ function corsHeaders(req: Request, config: Config): Record<string, string> {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta",
-    "Access-Control-Max-Age": "86400",
+      "Content-Type, Authorization, x-api-key, x-proxy-api-key, anthropic-version, anthropic-beta",
     Vary: "Origin",
   };
 }
 
-function requireOperationalAuth(req: Request, config: Config): Response | undefined {
+function requireOperationalAuth(
+	req: Request,
+	config: Config,
+	server?: Server<unknown>,
+): Response | undefined {
 	// When a proxy key is configured it is always required — localhost or not.
 	if (config.proxyApiKey) {
 		return isAuthorized(req, config.proxyApiKey)
 			? undefined
 			: anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
-	// No proxy key: keep operational endpoints open on loopback for local use,
-	// but lock them down when reached through any non-localhost host (e.g. a LAN
-	// IP) so they aren't world-readable if the proxy is ever exposed.
+	// If running under Bun.serve, inspect the real socket IP address to prevent
+	// Host-header spoofing. Fall back to parsed URL hostname only when no socket IP
+	// is exposed (e.g. in-memory test invocations).
+	const socketIp = server?.requestIP?.(req)?.address;
+	if (socketIp) {
+		const loopback =
+			socketIp === "127.0.0.1" ||
+			socketIp === "::1" ||
+			socketIp === "::ffff:127.0.0.1" ||
+			socketIp === "localhost";
+		if (!loopback) {
+			return anthropicError(
+				401,
+				"authentication_error",
+				"Set PROXY_API_KEY to access operational endpoints over the network.",
+			);
+		}
+		return undefined;
+	}
+
 	const host = new URL(req.url).hostname;
 	const loopback =
 		host === "localhost" ||
@@ -226,7 +247,7 @@ function dashboardHtml(): string {
   <script>const labels={requestsTotal:'Requests',requestsActive:'Active requests',streamsActive:'Active streams',fallbacksTotal:'Fallbacks',upstreamErrorsTotal:'Upstream errors',rateLimitsTotal:'Rate limits',queuedRequests:'Queued requests'};async function load(){const m=await fetch('/dashboard.json').then(r=>r.json());document.querySelector('#grid').innerHTML=Object.entries(labels).map(([k,l])=>'<div class="card"><div class="muted">'+l+'</div><div class="value">'+m[k]+'</div></div>').join('')}load();setInterval(load,2000)</script></body></html>`;
 }
 
-function setupGracefulShutdown(server: ReturnType<typeof Bun.serve>) {
+function setupGracefulShutdown(server: Server<unknown>) {
   let shuttingDown = false;
 
   const shutdown = (signal: string) => {
@@ -234,11 +255,14 @@ function setupGracefulShutdown(server: ReturnType<typeof Bun.serve>) {
     shuttingDown = true;
     log(`Shutting down (${signal})…`);
     try {
-      server.stop(true);
+      server.stop(false);
     } catch {
       /* ignore */
     }
-    process.exit(0);
+    const timer = setTimeout(() => {
+      process.exit(0);
+    }, 5000);
+    timer.unref?.();
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));
