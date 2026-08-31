@@ -51,6 +51,7 @@ export interface AnthropicTool {
 export interface AnthropicToolChoice {
   type: "auto" | "any" | "tool" | "none";
   name?: string;
+  disable_parallel_tool_use?: boolean;
 }
 
 export interface AnthropicMessagesRequest {
@@ -112,6 +113,7 @@ export interface OpenAIChatRequest {
   stream_options?: { include_usage?: boolean };
   tools?: unknown[];
   tool_choice?: unknown;
+  parallel_tool_calls?: boolean;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "no_think";
 }
 

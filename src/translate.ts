@@ -107,6 +107,10 @@ export function translateRequest(
 		} else if (body.tool_choice.type === "none") {
 			openai.tool_choice = "none";
 		}
+
+		if (body.tool_choice.disable_parallel_tool_use === true) {
+			openai.parallel_tool_calls = false;
+		}
 	}
 
 	return openai;
@@ -692,20 +696,21 @@ export class StreamTranslator {
 			// Message would carry only a thinking block (or nothing) — invalid on
 			// echo: OpenAI-style gateways demand content or tool_calls alongside
 			// reasoning_content. Emit a neutral text block so the turn round-trips.
+			const fallbackIdx = this.nextBlockIdx++;
 			events.push(
 				sse("content_block_start", {
 					type: "content_block_start",
-					index: 0,
+					index: fallbackIdx,
 					content_block: { type: "text", text: "" },
 				}),
 				sse("content_block_delta", {
 					type: "content_block_delta",
-					index: 0,
+					index: fallbackIdx,
 					delta: { type: "text_delta", text: "(stream ended before completion)" },
 				}),
 				sse("content_block_stop", {
 					type: "content_block_stop",
-					index: 0,
+					index: fallbackIdx,
 				}),
 			);
 		}

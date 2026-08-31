@@ -59,6 +59,23 @@ describe("translateRequest", () => {
 		expect(out.stream_options).toEqual({ include_usage: true });
 	});
 
+	test("maps disable_parallel_tool_use to parallel_tool_calls: false", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			tools: [
+				{
+					name: "get_weather",
+					description: "Weather",
+					input_schema: { type: "object", properties: {} },
+				},
+			],
+			tool_choice: { type: "auto", disable_parallel_tool_use: true },
+		});
+		expect(out.parallel_tool_calls).toBe(false);
+		expect(out.tool_choice).toBe("auto");
+	});
+
 	test("maps tool_result to role:tool messages", () => {
 		const out = translateRequest(
 			{
@@ -832,5 +849,22 @@ describe("StreamTranslator", () => {
 		}));
 		const joined = [...end, ...t.finalize()].join("");
 		expect(joined).toContain('"output_tokens":4');
+	});
+
+	test("reasoning chunk followed by finish uses next index for fallback text block", () => {
+		const t = new StreamTranslator("m");
+		const c1 = t.processChunk(
+			JSON.stringify({
+				choices: [{ delta: { reasoning_content: "thinking deeply" }, index: 0 }],
+			}),
+		);
+		const c2 = t.finalize("stop");
+		const allEvents = [...c1, ...c2].join("");
+		// Thinking block has index 0
+		expect(allEvents).toContain('"type":"content_block_start","index":0');
+		expect(allEvents).toContain('"type":"thinking"');
+		// Fallback text block should have index 1, NOT 0
+		expect(allEvents).toContain('"type":"content_block_start","index":1');
+		expect(allEvents).toContain('"type":"text"');
 	});
 });
