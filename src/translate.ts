@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { createHash } from "node:crypto";
+import { anthropicErrorSse, extractErrorMessage, truncate } from "./errors";
 import type {
 	AnthropicContentBlock,
 	AnthropicMessage,
@@ -16,8 +17,6 @@ import type {
 	OpenAIMessage,
 	ReasoningEffort,
 } from "./types";
-
-import { anthropicErrorSse, extractErrorMessage, truncate } from "./errors";
 
 // ─── Request Translation (Anthropic → OpenAI) ──────────────────────────────
 
@@ -431,6 +430,12 @@ export class StreamTranslator {
 	 * Returns Anthropic SSE event strings ready to write.
 	 */
 	processChunk(data: string): string[] {
+		// Once finalize() has run, message_stop has been emitted and the stream is
+		// over. Without this guard a trailing chunk (some gateways send one after
+		// [DONE]) would open a new content block *after* message_stop, which
+		// violates the event ordering clients rely on.
+		if (this.finished) return [];
+
 		if (data === "[DONE]") {
 			// No explicit reason: let finalize() use the finish_reason the
 			// upstream actually sent. Passing "stop" here would discard it.
@@ -494,11 +499,21 @@ export class StreamTranslator {
 			if (!this.thinkingBlockActive) {
 				this.thinkingBlockIdx = this.nextBlockIdx++;
 				this.thinkingBlockActive = true;
+				// The signature is synthesized here for the same reason as in the
+				// non-streaming path: Anthropic's schema requires it on a thinking
+				// block and we have no upstream one to forward. Streaming is the
+				// common case, so leaving it off would make most thinking blocks
+				// schema-invalid.
+				const seed = String(delta.reasoning_content);
 				events.push(
 					sse("content_block_start", {
 						type: "content_block_start",
 						index: this.thinkingBlockIdx,
-						content_block: { type: "thinking", thinking: "" },
+						content_block: {
+							type: "thinking",
+							thinking: "",
+							signature: thinkingSignature(seed),
+						},
 					}),
 				);
 			}
@@ -777,9 +792,13 @@ function sse(event: string, data: unknown): string {
 /**
  * Anthropic requires an opaque `signature` on thinking blocks. This proxy has
  * no upstream signature to forward, so derive a deterministic placeholder: the
- * client needs the field present — and stable, so the value survives an echo —
- * for the block to be schema-valid. It carries no cryptographic meaning and is
- * never forwarded upstream.
+ * client needs the field present for the block to be schema-valid.
+ *
+ * The value is a pure function of the reasoning text (the whole block in the
+ * non-streaming path, the first delta in the streaming one, where the full text
+ * is not yet known). It carries no cryptographic meaning, is never verified,
+ * and is never forwarded upstream — nothing on either side treats it as
+ * anything but a required field.
  */
 function thinkingSignature(thinking: string): string {
 	return createHash("sha256").update(thinking, "utf8").digest("hex").slice(0, 32);

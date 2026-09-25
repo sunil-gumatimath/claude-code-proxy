@@ -1023,4 +1023,82 @@ describe("StreamTranslator", () => {
 		);
 		expect(t.finalize().join("")).toContain('"stop_reason":"max_tokens"');
 	});
+
+	// A gateway that sends one more chunk after [DONE] used to open a fresh
+	// content block *after* message_stop had already been emitted, which breaks
+	// the event ordering clients rely on to know the turn is over.
+	test("a chunk after [DONE] emits nothing", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "real" } }] }));
+		const done = t.processChunk("[DONE]").join("");
+		expect(done).toContain("message_stop");
+
+		const after = t.processChunk(
+			JSON.stringify({ choices: [{ delta: { content: "GHOST" } }] }),
+		);
+		expect(after).toEqual([]);
+	});
+
+	test("a chunk after an explicit finalize() emits nothing", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "a" } }] }));
+		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+		expect(t.finalize().join("")).toContain("message_stop");
+
+		expect(
+			t.processChunk(JSON.stringify({ choices: [{ delta: { content: "LATE" } }] })),
+		).toEqual([]);
+		expect(t.processChunk("[DONE]")).toEqual([]);
+	});
+
+	test("a late tool_call after finalize is not turned into a dangling block", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "a" } }] }));
+		t.finalize();
+		const late = t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{ index: 0, id: "call_late", function: { name: "fn", arguments: "{}" } },
+							],
+						},
+					},
+				],
+			}),
+		);
+		expect(late).toEqual([]);
+	});
+
+	test("a streamed thinking block carries a signature", () => {
+		// Anthropic's schema requires `signature` on a thinking block. The
+		// non-streaming path synthesised one; the streaming path did not, so the
+		// common case produced schema-invalid blocks.
+		const t = new StreamTranslator("m");
+		const events = t
+			.processChunk(
+				JSON.stringify({ choices: [{ delta: { reasoning_content: "thinking hard" } }] }),
+			)
+			.join("");
+		expect(events).toContain('"type":"thinking"');
+		expect(events).toMatch(/"signature":"[0-9a-f]{32}"/);
+	});
+
+	test("the streamed signature is deterministic for the same reasoning", () => {
+		// Only the signature is compared: message_start carries a per-translator
+		// random id, so the full event string is never equal.
+		const signatureFor = (reasoning: string) => {
+			const t = new StreamTranslator("m");
+			const out = t
+				.processChunk(
+					JSON.stringify({ choices: [{ delta: { reasoning_content: reasoning } }] }),
+				)
+				.join("");
+			return /"signature":"([0-9a-f]{32})"/.exec(out)?.[1];
+		};
+		expect(signatureFor("same")).toBeDefined();
+		expect(signatureFor("same")).toBe(signatureFor("same"));
+		expect(signatureFor("different")).not.toBe(signatureFor("same"));
+	});
 });
