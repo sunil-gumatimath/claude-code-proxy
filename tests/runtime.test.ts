@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { canFallback, isAbortError } from "../src/handlers/upstream";
 import {
 	getMetrics,
 	getRuntime,
@@ -10,6 +11,49 @@ import {
 	resetRuntimeForTests,
 } from "../src/runtime";
 import { testConfig } from "./fixtures";
+
+// ── canFallback ──────────────────────────────────────────────────────────────
+
+describe("canFallback", () => {
+	test("transient statuses with attempts left → true", () => {
+		for (const status of [404, 408, 429, 403, 402, 500, 503]) {
+			expect(canFallback(status, 0, 2)).toBe(true);
+		}
+	});
+
+	test("a 400 is the client's fault and is not retried", () => {
+		expect(canFallback(400, 0, 2)).toBe(false);
+		expect(canFallback(422, 0, 2)).toBe(false);
+	});
+
+	test("the last attempt never falls back, whatever the status", () => {
+		for (const status of [404, 429, 500]) {
+			expect(canFallback(status, 1, 2)).toBe(false);
+		}
+	});
+
+	test("a single-candidate chain has nowhere to fall back to", () => {
+		expect(canFallback(429, 0, 1)).toBe(false);
+	});
+});
+
+describe("isAbortError", () => {
+	test("recognises an AbortError", () => {
+		expect(isAbortError(Object.assign(new Error("x"), { name: "AbortError" }))).toBe(
+			true,
+		);
+	});
+
+	test("recognises Bun's string abort reason", () => {
+		expect(isAbortError(new Error("The operation was aborted"))).toBe(true);
+		expect(isAbortError("aborted")).toBe(true);
+	});
+
+	test("does not misclassify an ordinary failure", () => {
+		expect(isAbortError(new Error("ECONNREFUSED"))).toBe(false);
+		expect(isAbortError(new TypeError("fetch failed"))).toBe(false);
+	});
+});
 
 // ── RequestLimiter ───────────────────────────────────────────────────────────
 

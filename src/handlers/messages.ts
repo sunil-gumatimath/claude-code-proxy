@@ -1,43 +1,30 @@
 // ============================================================================
-// handlers/messages.ts — POST /v1/messages
+// handlers/messages.ts — POST /v1/messages and /v1/messages/count_tokens
 // ============================================================================
-import { createHash, timingSafeEqual } from "node:crypto";
+
+import { extractApiKey, isAuthorized } from "../auth";
 import type { Config } from "../config";
-import { extractApiKey } from "../auth";
-import {
-	anthropicError,
-	anthropicErrorSse,
-	extractErrorMessage,
-	mapUpstreamErrorType,
-	truncate,
-} from "../errors";
+import { anthropicError, extractErrorMessage, rateLimited, truncate } from "../errors";
 import { colors, debug, error, log, redact } from "../log";
-import {
-	beginRequest,
-	getRuntime,
-	recordFallback,
-	recordModelRequest,
-	recordUpstreamError,
-} from "../runtime";
-import { StreamTranslator, translateRequest, translateResponse, uid } from "../translate";
+import { displayTarget, qualifyModel } from "../providers";
+import { buildCandidateTargets, isTargetAllowed, resolveTarget } from "../routing";
+import { beginRequest, getRuntime, recordUpstreamError } from "../runtime";
+import { translateRequest, translateResponse, uid } from "../translate";
 import type { AnthropicMessagesRequest, OpenAIChatResponse } from "../types";
-import {
-	displayTarget,
-	getCapabilities,
-	getProvider,
-	isFreeTarget,
-	normalizeReasoningEffort,
-	parseTarget,
-	providerEnabled,
-	qualifyModel,
-	type UpstreamTarget,
-} from "../providers";
+import { BODY_ABORTED, BODY_TOO_LARGE, isBodyError, readBodyLimited } from "./body";
+import { handleStream } from "./stream";
+import { callUpstream } from "./upstream";
 
 const { cyan, green, bold, dim } = colors;
 
+/** Hard ceiling on max_tokens, independent of what the client asks for. */
+const MAX_OUTPUT_TOKENS = 16384;
+
+const CLIENT_GONE = () => anthropicError(499, "api_error", "Client disconnected.");
+
 export async function handleMessages(req: Request, config: Config): Promise<Response> {
 	const startTime = performance.now();
-	const requestId = `req_${uid()}`;
+	const requestId = resolveRequestId(req);
 	let releaseSlot: (() => void) | undefined;
 	let finishRequest: (() => void) | undefined;
 
@@ -46,42 +33,18 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 			return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 		}
 
-		const bodyText = await readBodyLimited(req, config.maxBodyBytes);
-		let body: AnthropicMessagesRequest;
-		try {
-			const parsed: unknown = JSON.parse(bodyText);
-			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-				throw new Error("INVALID_BODY");
-			}
-			body = parsed as AnthropicMessagesRequest;
-			if (body.messages !== undefined && !Array.isArray(body.messages)) {
-				throw new Error("INVALID_BODY");
-			}
-			if (body.model !== undefined && typeof body.model !== "string") {
-				throw new Error("INVALID_BODY");
-			}
-		} catch {
-			return anthropicError(
-				400,
-				"invalid_request_error",
-				"Request body must be valid JSON.",
-			);
-		}
+		const body = await parseMessagesBody(req, config);
+		if (body instanceof Response) return body;
 
 		const originalModel = body.model || config.defaultModel;
 		const isStream = body.stream === true;
 		finishRequest = beginRequest(isStream);
-
 		log(
 			`${cyan("→")} ${isStream ? "stream" : "  sync"} ${bold(originalModel)} ${dim(requestId)}`,
 		);
 		debug("Anthropic request body", body);
 
-		const requestedTarget = resolveTarget(
-			body.model || config.defaultModel,
-			body,
-			config,
-		);
+		const requestedTarget = resolveTarget(originalModel, body, config);
 		if (!isTargetAllowed(requestedTarget, config)) {
 			return anthropicError(
 				400,
@@ -89,216 +52,99 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 				`Model is not permitted by this free-only proxy: ${displayTarget(requestedTarget)}`,
 			);
 		}
-		const openaiBody = translateRequest(
-			body,
-			config.defaultModel,
-			config.reasoningEffort,
-		);
-		// MODEL_PREFIX is applied here — the single place the upstream model
-		// name is finalized — so translateRequest stays prefix-free.
-		openaiBody.model = qualifyModel(requestedTarget, config);
-		debug("Translated OpenAI body", openaiBody);
 
 		// When proxy authentication is configured, the client token is the proxy
 		// secret and must never be forwarded as an upstream provider key.
 		const requestApiKey = config.proxyApiKey ? "" : extractApiKey(req);
-		const enabledTargets = buildCandidateTargets(
-			requestedTarget,
-			body,
-			config,
-			requestApiKey,
-		);
-		if (!enabledTargets.length) {
+		const targets = buildCandidateTargets(requestedTarget, body, config, requestApiKey);
+		if (!targets.length) {
 			return anthropicError(
 				400,
 				"invalid_request_error",
-				"No enabled free model supports this request's required capabilities.",
+				"No enabled model supports this request's required capabilities.",
 			);
 		}
-		debug(`Upstream candidates: ${enabledTargets.map(displayTarget).join(", ")}`);
+		debug(`Upstream candidates: ${targets.map(displayTarget).join(", ")}`);
 
-		let controller!: AbortController;
-		let abortUpstream!: () => void;
-		const runtime = getRuntime(config);
-		if (req.signal.aborted) {
-			return anthropicError(499, "api_error", "Client disconnected.");
+		const translated = translateRequest(
+			body,
+			config.defaultModel,
+			config.reasoningEffort,
+		);
+		// MODEL_PREFIX is applied in callUpstream, at the single point where the
+		// upstream model name is finalized, so translateRequest stays prefix-free.
+		translated.model = qualifyModel(requestedTarget, config);
+		if (body.max_tokens != null && body.max_tokens > MAX_OUTPUT_TOKENS) {
+			// Silently truncating is how a client ends up with mysteriously short
+			// answers; say so in the log where the operator will actually see it.
+			log(
+				`${dim("clamped max_tokens")} ${body.max_tokens} → ${MAX_OUTPUT_TOKENS} ${dim(requestId)}`,
+			);
 		}
+		debug("Translated OpenAI body", translated);
+
+		if (req.signal.aborted) return CLIENT_GONE();
+		const runtime = getRuntime(config);
 		releaseSlot = await runtime.limiter.acquire(req.signal);
 		if (!releaseSlot) {
-			if (req.signal.aborted) {
-				return anthropicError(499, "api_error", "Client disconnected.");
-			}
-			return anthropicError(429, "rate_limit_error", "Proxy is busy; try again shortly.");
+			return req.signal.aborted
+				? CLIENT_GONE()
+				: rateLimited("Proxy is busy; try again shortly.");
 		}
 		if (req.signal.aborted) {
 			releaseSlot();
 			releaseSlot = undefined;
-			return anthropicError(499, "api_error", "Client disconnected.");
+			return CLIENT_GONE();
 		}
 
-		const cooled = enabledTargets.filter(
-			(target) => !runtime.cooldowns.isCooling(displayTarget(target)),
-		);
-		const targets = cooled.length ? cooled : enabledTargets;
-		let upstreamRes: Response | undefined;
+		const outcome = await callUpstream({
+			config,
+			signal: req.signal,
+			targets,
+			body: translated,
+			requestApiKey,
+			requestedProvider: requestedTarget.provider,
+			requestId,
+		});
 
-		for (let attempt = 0; attempt < targets.length; attempt++) {
-			const target = targets[attempt];
-			const provider = getProvider(config, target.provider);
-			const apiKey =
-				provider.apiKey ||
-				(target.provider === requestedTarget.provider ? requestApiKey : "");
-			openaiBody.model = qualifyModel(target, config);
-			const targetEffort = normalizeReasoningEffort(target, openaiBody.reasoning_effort);
-			const payload = {
-				...openaiBody,
-				...(targetEffort ? { reasoning_effort: targetEffort } : {}),
-			};
-			if (!targetEffort && "reasoning_effort" in payload) {
-				delete (payload as { reasoning_effort?: unknown }).reasoning_effort;
-			}
-			recordModelRequest(displayTarget(target));
-			controller = new AbortController();
-			abortUpstream = () => controller.abort("Client disconnected");
-			req.signal.addEventListener("abort", abortUpstream, { once: true });
-			const timer = setTimeout(() => controller.abort(), config.upstreamTimeoutMs);
+		if (!outcome.ok) return outcome.response;
 
-			try {
-				const response = await fetch(`${provider.baseUrl}/chat/completions`, {
-					method: "POST",
-					headers: {
-						"Content-Type": "application/json",
-						Authorization: `Bearer ${apiKey}`,
-					},
-					body: JSON.stringify(payload),
-					signal: controller.signal,
-					tls:
-						config.upstreamTlsRejectUnauthorized && !config.upstreamCaFile
-							? undefined
-							: {
-									rejectUnauthorized: config.upstreamTlsRejectUnauthorized,
-									...(config.upstreamCaFile
-										? { ca: [Bun.file(config.upstreamCaFile)] }
-										: {}),
-								},
-				});
-
-				if (response.ok) {
-					upstreamRes = response;
-					runtime.cooldowns.succeed(displayTarget(target));
-					if (attempt > 0) {
-						recordFallback();
-						log(`${green("↳")} fallback ${dim(displayTarget(target))} ${dim(requestId)}`);
-					}
-					break;
-				}
-
-				const errText = await response.text();
-				recordUpstreamError(response.status);
-				if (
-					response.status === 429 ||
-					response.status === 404 ||
-					response.status === 403 ||
-					response.status === 402 ||
-					response.status >= 500
-				)
-					runtime.cooldowns.fail(displayTarget(target));
-				if (canFallback(response.status, attempt, targets.length)) {
-					log(
-						`${colors.yellow("↳")} upstream ${response.status} for ${dim(displayTarget(target))}; trying ${dim(displayTarget(targets[attempt + 1]))} ${dim(requestId)}`,
-					);
-					req.signal.removeEventListener("abort", abortUpstream);
-					continue;
-				}
-				req.signal.removeEventListener("abort", abortUpstream);
-				error(`Upstream ${response.status}: ${redact(errText).slice(0, 200)}`);
-				return anthropicError(
-					response.status >= 400 && response.status < 600 ? response.status : 502,
-					mapUpstreamErrorType(response.status),
-					`Upstream returned ${response.status}: ${truncate(errText, 2000)}`,
-				);
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				const isAbort =
-					(err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
-				if (isAbort && req.signal.aborted) {
-					req.signal.removeEventListener("abort", abortUpstream);
-					return anthropicError(499, "api_error", "Client disconnected.");
-				}
-				if (isAbort) {
-					recordUpstreamError(504);
-					runtime.cooldowns.fail(displayTarget(target));
-					if (attempt < targets.length - 1) {
-						log(
-							`${colors.yellow("↳")} upstream timeout for ${dim(displayTarget(target))}; trying ${dim(displayTarget(targets[attempt + 1]))} ${dim(requestId)}`,
-						);
-						req.signal.removeEventListener("abort", abortUpstream);
-						continue;
-					}
-					req.signal.removeEventListener("abort", abortUpstream);
-					return anthropicError(
-						504,
-						"api_error",
-						`Upstream timeout after ${config.upstreamTimeoutMs}ms`,
-					);
-				}
-				recordUpstreamError();
-				runtime.cooldowns.fail(displayTarget(target));
-				if (attempt < targets.length - 1) {
-					log(
-						`${colors.yellow("↳")} upstream connection failed for ${dim(displayTarget(target))}; trying ${dim(displayTarget(targets[attempt + 1]))} ${dim(requestId)}`,
-					);
-					req.signal.removeEventListener("abort", abortUpstream);
-					continue;
-				}
-				req.signal.removeEventListener("abort", abortUpstream);
-				return anthropicError(502, "api_error", `Failed to reach upstream: ${msg}`);
-			} finally {
-				clearTimeout(timer);
-			}
-		}
-
-		if (!upstreamRes) {
-			req.signal.removeEventListener("abort", abortUpstream);
-			return anthropicError(502, "api_error", "No upstream model was available.");
-		}
+		// `detach` removes the client-abort listener that callUpstream registered.
+		// It must run on every exit path, or the listener outlives the request.
+		const { response: upstream, controller, detach } = outcome;
 
 		if (isStream) {
 			const streamRelease = releaseSlot;
 			const streamFinish = finishRequest;
 			releaseSlot = undefined;
 			finishRequest = undefined;
-			return handleStream(
-				upstreamRes,
-				originalModel,
-				startTime,
+			return handleStream(upstream, {
+				model: originalModel,
 				requestId,
-				controller,
-				() => {
-					req.signal.removeEventListener("abort", abortUpstream);
+				startTime,
+				upstreamController: controller,
+				cleanup: () => {
+					detach();
 					streamRelease?.();
 					streamFinish?.();
 				},
-				config.maxBodyBytes,
-				config.upstreamTimeoutMs,
-			);
+				maxBufferBytes: config.maxBodyBytes,
+				idleTimeoutMs: config.upstreamTimeoutMs,
+			});
 		}
+
 		try {
-			return await handleSync(upstreamRes, originalModel, startTime, requestId);
+			return await handleSync({
+				upstream,
+				model: originalModel,
+				startTime,
+				requestId,
+			});
 		} finally {
-			req.signal.removeEventListener("abort", abortUpstream);
+			detach();
 		}
 	} catch (err) {
-		const msg = err instanceof Error ? err.message : String(err);
-		if (msg === "BODY_TOO_LARGE") {
-			return anthropicError(
-				413,
-				"invalid_request_error",
-				`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
-			);
-		}
-		error(`Proxy error: ${msg}`);
-		return anthropicError(500, "api_error", msg);
+		return proxyFailure(err, config);
 	} finally {
 		releaseSlot?.();
 		finishRequest?.();
@@ -312,29 +158,26 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
  * is roughly chars/4). The proxy treats it as an estimate only.
  *
  * Deliberately does NOT take a slot from the upstream RequestLimiter: it
- * performs no upstream work, and Claude Code calls it constantly. Sharing the
- * limiter meant a busy proxy answered its own context accounting with 429.
+ * performs no upstream work and Claude Code calls it constantly, so sharing
+ * the limiter meant a busy proxy answered its own context accounting with 429.
  */
 export async function handleCountTokens(req: Request, config: Config): Promise<Response> {
 	if (!isAuthorized(req, config.proxyApiKey)) {
 		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
-	if (req.signal.aborted) {
-		return anthropicError(499, "api_error", "Client disconnected.");
-	}
+	if (req.signal.aborted) return CLIENT_GONE();
+
 	let bodyText: string;
 	try {
 		bodyText = await readBodyLimited(req, config.maxBodyBytes);
 	} catch (err) {
-		if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
-			return anthropicError(
-				413,
-				"invalid_request_error",
-				`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
-			);
+		if (isBodyError(err, BODY_TOO_LARGE)) {
+			return tooLarge(config);
 		}
+		if (isBodyError(err, BODY_ABORTED)) return CLIENT_GONE();
 		throw err;
 	}
+
 	try {
 		JSON.parse(bodyText);
 	} catch {
@@ -344,44 +187,117 @@ export async function handleCountTokens(req: Request, config: Config): Promise<R
 			"Request body must be valid JSON.",
 		);
 	}
+
+	// Always at least 1: an empty conversation is not a zero-token request, and
+	// Claude Code divides by this figure.
 	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
 	return Response.json(
 		{ input_tokens: inputTokens },
-		{ headers: { "Cache-Control": "no-store" } },
+		{ headers: { "Cache-Control": "no-store", "x-request-id": resolveRequestId(req) } },
 	);
 }
 
-async function handleSync(
-	kiloRes: Response,
-	model: string,
-	startTime: number,
-	requestId: string,
-): Promise<Response> {
-	const openaiResult = (await kiloRes.json()) as OpenAIChatResponse & {
+// ── Request parsing ─────────────────────────────────────────────────────────
+
+function tooLarge(config: Config): Response {
+	return anthropicError(
+		413,
+		"invalid_request_error",
+		`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
+	);
+}
+
+/** Parse and shape-check the request body, or return the error response. */
+async function parseMessagesBody(
+	req: Request,
+	config: Config,
+): Promise<AnthropicMessagesRequest | Response> {
+	let bodyText: string;
+	try {
+		bodyText = await readBodyLimited(req, config.maxBodyBytes);
+	} catch (err) {
+		if (isBodyError(err, BODY_TOO_LARGE)) return tooLarge(config);
+		if (isBodyError(err, BODY_ABORTED)) return CLIENT_GONE();
+		throw err;
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(bodyText);
+	} catch {
+		return anthropicError(
+			400,
+			"invalid_request_error",
+			"Request body must be valid JSON.",
+		);
+	}
+	// Validate the handful of fields the translator actually dereferences, so a
+	// malformed body fails here with a 400 instead of throwing deeper in.
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return anthropicError(
+			400,
+			"invalid_request_error",
+			"Request body must be a JSON object.",
+		);
+	}
+	const body = parsed as AnthropicMessagesRequest;
+	if (body.messages !== undefined && !Array.isArray(body.messages)) {
+		return anthropicError(400, "invalid_request_error", "`messages` must be an array.");
+	}
+	if (body.model !== undefined && typeof body.model !== "string") {
+		return anthropicError(400, "invalid_request_error", "`model` must be a string.");
+	}
+	return body;
+}
+
+/**
+ * Reuse the client's request id when it is safe to echo, so proxy logs line up
+ * with the client's own trace; otherwise mint one. Sanitising to a strict
+ * character set also makes header injection impossible.
+ */
+function resolveRequestId(req: Request): string {
+	const inbound = req.headers.get("x-request-id")?.trim();
+	if (inbound && /^[A-Za-z0-9._-]{1,128}$/.test(inbound)) return inbound;
+	return `req_${uid()}`;
+}
+
+// ── Non-streaming response ──────────────────────────────────────────────────
+
+interface SyncArgs {
+	upstream: Response;
+	model: string;
+	startTime: number;
+	requestId: string;
+}
+
+async function handleSync(args: SyncArgs): Promise<Response> {
+	const { upstream, model, startTime, requestId } = args;
+	const parsed = (await upstream.json()) as OpenAIChatResponse & {
 		error?: { message?: unknown };
 	};
-	debug("OpenAI response", openaiResult);
+	debug("OpenAI response", parsed);
 
 	// Some gateways answer HTTP 200 with an error object in the body. Without
 	// this check the proxy would forward a fabricated empty completion.
-	const upstreamErr = openaiResult.error;
-	if (upstreamErr) {
-		const errMsg = extractErrorMessage(upstreamErr, "Upstream returned an error");
-		error(`Upstream error: ${redact(errMsg).slice(0, 200)}`);
-		return anthropicError(502, "api_error", `Upstream error: ${truncate(errMsg, 2000)}`);
+	if (parsed.error) {
+		const msg = extractErrorMessage(parsed.error, "Upstream returned an error");
+		// Counted so a gateway that fails this way shows up in
+		// kilo_proxy_upstream_errors_total rather than looking like success.
+		recordUpstreamError(200);
+		error(`Upstream error: ${redact(msg).slice(0, 200)}`);
+		return anthropicError(502, "api_error", `Upstream error: ${truncate(msg, 2000)}`, {
+			"x-request-id": requestId,
+		});
 	}
 
-	const anthropicResult = translateResponse(openaiResult, model);
+	const result = translateResponse(parsed, model);
 	const elapsed = (performance.now() - startTime).toFixed(0);
-
 	log(
-		`${green("←")}   sync ${dim(model)} ` +
-			`stop=${anthropicResult.stop_reason} ` +
-			`in=${anthropicResult.usage.input_tokens} out=${anthropicResult.usage.output_tokens} ` +
-			`${dim(elapsed + "ms")} ${dim(requestId)}`,
+		`${green("←")}   sync ${dim(model)} stop=${result.stop_reason} ` +
+			`in=${result.usage.input_tokens} out=${result.usage.output_tokens} ` +
+			`${dim(`${elapsed}ms`)} ${dim(requestId)}`,
 	);
-
-	return Response.json(anthropicResult, {
+	return Response.json(result, {
 		headers: {
 			"Content-Type": "application/json",
 			"Cache-Control": "no-store",
@@ -390,329 +306,17 @@ async function handleSync(
 	});
 }
 
-function handleStream(
-	kiloRes: Response,
-	model: string,
-	startTime: number,
-	requestId: string,
-	upstreamController: AbortController,
-	cleanup: () => void,
-	maxBodyBytes = 20 * 1024 * 1024,
-	idleTimeoutMs = 120_000,
-): Response {
-	const translator = new StreamTranslator(model);
-	const encoder = new TextEncoder();
+// ── Failure mapping ─────────────────────────────────────────────────────────
 
-	// Web standard plus Bun's extra methods (readMany etc.).
-	// We only use read() and cancel(), so a narrow interface avoids coupling to Bun's augmented type.
-	interface StreamReader {
-		read(): Promise<{ done: boolean; value: Uint8Array }>;
-		cancel(reason?: unknown): Promise<void>;
-	}
-	let reader: StreamReader | undefined;
-	let cleaned = false;
-	const onceCleanup = () => {
-		if (cleaned) return;
-		cleaned = true;
-		cleanup();
-	};
-	let canceled = false;
-
-	const safeEnqueue = (controller: ReadableStreamDefaultController, data: Uint8Array) => {
-		if (canceled) return;
-		try {
-			controller.enqueue(data);
-		} catch {
-			// Consumer went away between the cancel check and the enqueue.
-			canceled = true;
-		}
-	};
-
-	const safeClose = (controller: ReadableStreamDefaultController) => {
-		if (canceled) return;
-		canceled = true;
-		try {
-			controller.close();
-		} catch {
-			// Already closed by the runtime — nothing left to do.
-		}
-	};
-
-	const readable = new ReadableStream({
-		async start(controller) {
-			reader = kiloRes.body?.getReader();
-			if (!reader) {
-				for (const ev of translator.finalize()) {
-					safeEnqueue(controller, encoder.encode(ev));
-				}
-				safeClose(controller);
-				onceCleanup();
-				return;
-			}
-
-			const decoder = new TextDecoder();
-			let buffer = "";
-			let idleTimer: ReturnType<typeof setTimeout> | undefined;
-			let idleTimedOut = false;
-
-			const clearIdleTimer = () => {
-				if (idleTimer === undefined) return;
-				clearTimeout(idleTimer);
-				idleTimer = undefined;
-			};
-			const stallMessage = () =>
-				`Upstream stream stalled for more than ${idleTimeoutMs}ms`;
-			// The header-level timeout is already cleared by the time we get
-			// here, so nothing bounds the body: an upstream that sends headers
-			// and then stalls would hold its concurrency slot for good. Re-arm a
-			// per-read deadline that resets on every chunk of progress.
-			const armIdleTimer = () => {
-				clearIdleTimer();
-				idleTimer = setTimeout(() => {
-					idleTimedOut = true;
-					// Both paths matter: cancel() releases the socket, abort()
-					// unwinds a body that cancel() alone would not disturb.
-					void reader?.cancel("upstream stream idle timeout").catch(() => {});
-					upstreamController.abort("Upstream stream idle timeout");
-				}, idleTimeoutMs);
-			};
-
-			try {
-				armIdleTimer();
-				while (!canceled) {
-					const { done, value } = await reader.read();
-					if (done || canceled) break;
-					armIdleTimer();
-
-					buffer += decoder.decode(value, { stream: true });
-					if (buffer.length > maxBodyBytes) {
-						throw new Error(
-							`SSE stream chunk buffer exceeded maximum size of ${maxBodyBytes} bytes`,
-						);
-					}
-					const lines = buffer.split("\n");
-					buffer = lines.pop() || "";
-					for (const line of lines) {
-						if (canceled) break;
-						const trimmed = line.trim();
-						if (!trimmed || trimmed.startsWith(":")) continue;
-
-						if (trimmed.startsWith("data:")) {
-							const data = trimmed.startsWith("data: ")
-								? trimmed.slice(6)
-								: trimmed.slice(5).trimStart();
-							const events = translator.processChunk(data);
-							for (const ev of events) {
-								safeEnqueue(controller, encoder.encode(ev));
-							}
-						}
-					}
-				}
-
-				clearIdleTimer();
-
-				if (idleTimedOut) {
-					// The stream will not complete on its own. Tell the client
-					// instead of closing it as a normal end_turn, which would
-					// look like a successfully finished (but empty) response.
-					const msg = stallMessage();
-					error(`${msg} ${dim(requestId)}`);
-					safeEnqueue(controller, encoder.encode(anthropicErrorSse("api_error", msg)));
-				} else {
-					if (!canceled && buffer.trim().startsWith("data:")) {
-						const trimmed = buffer.trim();
-						const data = trimmed.startsWith("data: ")
-							? trimmed.slice(6)
-							: trimmed.slice(5).trimStart();
-						for (const ev of translator.processChunk(data)) {
-							safeEnqueue(controller, encoder.encode(ev));
-						}
-					}
-
-					// Always close Anthropic stream cleanly
-					if (!canceled) {
-						for (const ev of translator.finalize()) {
-							safeEnqueue(controller, encoder.encode(ev));
-						}
-					}
-				}
-
-				const elapsed = (performance.now() - startTime).toFixed(0);
-				log(
-					`${green("←")} stream ${dim(model)} complete ${dim(elapsed + "ms")} ${dim(requestId)}`,
-				);
-				safeClose(controller);
-			} catch (err) {
-				if (canceled) return;
-				// The idle timer aborts the body, so the stall usually surfaces
-				// here rather than as a clean read() end. Report the stall, not
-				// the resulting abort error.
-				let msg = stallMessage();
-				if (!idleTimedOut) {
-					msg = err instanceof Error ? err.message : String(err);
-				}
-				if (!msg.includes("Controller is already closed")) {
-					error(`Stream error: ${msg}`);
-				}
-				safeEnqueue(controller, encoder.encode(anthropicErrorSse("api_error", msg)));
-				safeClose(controller);
-			} finally {
-				clearIdleTimer();
-				onceCleanup();
-			}
-		},
-		async cancel() {
-			canceled = true;
-			upstreamController.abort("Client stopped reading stream");
-			onceCleanup();
-		},
-	});
-
-	return new Response(readable, {
-		headers: {
-			"Content-Type": "text/event-stream; charset=utf-8",
-			"Cache-Control": "no-cache, no-transform",
-			Connection: "keep-alive",
-			"x-request-id": requestId,
-			"X-Accel-Buffering": "no",
-		},
-	});
-}
-
-/** When PROXY_API_KEY is unset the local proxy retains its existing behaviour. */
-export function isAuthorized(req: Request, expectedKey: string): boolean {
-	if (!expectedKey) return true;
-	const supplied = req.headers.get("x-proxy-api-key") || extractApiKey(req);
-	if (!supplied) return false;
-	const suppliedHash = createHash("sha256").update(supplied, "utf8").digest();
-	const expectedHash = createHash("sha256").update(expectedKey, "utf8").digest();
-	return timingSafeEqual(suppliedHash, expectedHash);
-}
-
-export function canFallback(
-	status: number,
-	attempt: number,
-	totalAttempts: number,
-): boolean {
-	return (
-		attempt < totalAttempts - 1 &&
-		// 404 = model retired/renamed, 403/402 = quota exhausted or free tier blocked, 429 = rate limit, 500+ = server error
-		(status === 404 ||
-			status === 408 ||
-			status === 429 ||
-			status === 403 ||
-			status === 402 ||
-			status >= 500)
-	);
-}
-
-export function resolveTarget(
-	requestedModel: string,
-	body: AnthropicMessagesRequest,
-	config: Config,
-): UpstreamTarget {
-	const explicit = parseTarget(requestedModel);
-	// Smart routing only rewrites bare `claude-*` names through the alias table.
-	// A provider-qualified id is already an explicit choice and is left alone.
-	if (!config.smartRouting || !requestedModel.toLowerCase().startsWith("claude-")) {
-		return explicit;
-	}
-	const requested = requestedModel.toLowerCase();
-	const hasImage = body.messages?.some(
-		(message) =>
-			Array.isArray(message.content) &&
-			message.content.some((block) => block.type === "image"),
-	);
-	if (hasImage) return parseTarget(config.visionModel);
-	const alias = config.modelAliases.find(({ pattern }) =>
-		globMatches(pattern, requested),
-	);
-	return alias ? parseTarget(alias.model) : explicit;
-}
-
-export function buildCandidateTargets(
-	first: UpstreamTarget,
-	body: AnthropicMessagesRequest,
-	config: Config,
-	requestApiKey = "",
-): UpstreamTarget[] {
-	const needsTools = Boolean(body.tools?.length);
-	const needsVision =
-		body.messages?.some(
-			(message) =>
-				Array.isArray(message.content) &&
-				message.content.some((block) => block.type === "image"),
-		) ?? false;
-	const targets = [first, ...config.fallbackModels.map((model) => parseTarget(model))];
-	return [
-		...new Map(
-			targets
-				.filter((target) => isTargetAllowed(target, config))
-				.filter((target) =>
-					providerEnabled(
-						config,
-						target.provider,
-						target.provider === first.provider ? requestApiKey : "",
-					),
-				)
-				.filter((target) => {
-					const capabilities = getCapabilities(target);
-					return (
-						(!needsTools || capabilities.tools) && (!needsVision || capabilities.vision)
-					);
-				})
-				.map((target) => [displayTarget(target), target]),
-		).values(),
-	];
-}
-
-export function isTargetAllowed(target: UpstreamTarget, config: Config): boolean {
-	const id = displayTarget(target);
-	const explicitlyAllowed = config.allowedModels.includes(id);
-	// FREE_MODELS_ONLY rejects paid models unless the operator has explicitly
-	// allowlisted them (ALLOWED_MODELS is an explicit approval list).
-	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed) return false;
-	return !config.allowedModels.length || explicitlyAllowed;
-}
-
-export function globMatches(pattern: string, value: string): boolean {
-	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, ".*");
-	return new RegExp(`^${escaped}$`, "i").test(value);
-}
-
-async function readBodyLimited(req: Request, maxBytes: number): Promise<string> {
-	const cl = req.headers.get("content-length");
-	if (cl && Number(cl) > maxBytes) {
-		throw new Error("BODY_TOO_LARGE");
-	}
-
-	const reader = req.body?.getReader();
-	if (!reader) return "";
-
-	const chunks: Uint8Array[] = [];
-	let total = 0;
-	const decoder = new TextDecoder();
-
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		total += value.byteLength;
-		if (total > maxBytes) {
-			try {
-				reader.cancel();
-			} catch {
-				/* ignore */
-			}
-			throw new Error("BODY_TOO_LARGE");
-		}
-		chunks.push(value);
-	}
-
-	const merged = new Uint8Array(total);
-	let offset = 0;
-	for (const c of chunks) {
-		merged.set(c, offset);
-		offset += c.byteLength;
-	}
-	return decoder.decode(merged);
+/**
+ * Map an unexpected throw onto an Anthropic error. The message is redacted
+ * before it leaves the process, so an internal path or an echoed credential
+ * cannot reach the client through the 500 body.
+ */
+function proxyFailure(err: unknown, config: Config): Response {
+	if (isBodyError(err, BODY_TOO_LARGE)) return tooLarge(config);
+	if (isBodyError(err, BODY_ABORTED)) return CLIENT_GONE();
+	const msg = err instanceof Error ? err.message : String(err);
+	error(`Proxy error: ${msg}`);
+	return anthropicError(500, "api_error", redact(msg) || "Internal server error.");
 }

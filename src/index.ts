@@ -3,8 +3,8 @@
 // ============================================================================
 
 import { loadConfig } from "./config";
-import { createServer } from "./server";
 import { error } from "./log";
+import { createServer } from "./server";
 
 try {
 	const config = loadConfig();

@@ -77,10 +77,6 @@ export function log(msg: string) {
 	console.log(`${ts()} ${msg}`);
 }
 
-export function info(msg: string) {
-	log(msg);
-}
-
 export function warn(msg: string) {
 	log(`${yellow("!")} ${msg}`);
 }

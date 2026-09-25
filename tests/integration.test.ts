@@ -1,89 +1,17 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { handleMessages, handleCountTokens } from "../src/handlers/messages";
-import { createServer } from "../src/server";
-import type { Config } from "../src/config";
+import { handleCountTokens, handleMessages } from "../src/handlers/messages";
 import { resetRuntimeForTests } from "../src/runtime";
-const baseConfig: Config = {
-	host: "127.0.0.1",
-	// Bind an ephemeral port. createServer() calls Bun.serve for real, so pinning
-	// 4181 made `bun test` fail with EADDRINUSE whenever a proxy was running on
-	// the default port. server.fetch() dispatches in-process by path, so the
-	// port in the request URLs below is irrelevant.
-	port: 0,
-	kiloApiKey: "kilo-key",
-	qwenApiKey: "qwen-key",
-	qwenBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-	proxyApiKey: "",
-	kiloBaseUrl: "https://api.kilo.ai/api/gateway",
-	modelPrefix: "",
-	defaultModel: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-	fallbackModels: [
-		"kilo/poolside/laguna-s-2.1:free",
-		"kilo/cohere/north-mini-code:free",
-		"kilo/stepfun/step-3.7-flash:free",
-	],
-	allowedModels: [
-		"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-		"kilo/poolside/laguna-s-2.1:free",
-		"kilo/cohere/north-mini-code:free",
-		"kilo/stepfun/step-3.7-flash:free",
-	],
-	freeModelsOnly: true,
-	visionModel: "kilo/stepfun/step-3.7-flash:free",
-	modelAliases: [],
-	reasoningEffort: "",
-	smartRouting: true,
-	maxConcurrentRequests: 4,
-	maxQueuedRequests: 20,
-	modelCooldownMs: 30_000,
-	debug: false,
-	upstreamTimeoutMs: 120_000,
-	upstreamTlsRejectUnauthorized: true,
-	upstreamCaFile: "",
-	maxBodyBytes: 20 * 1024 * 1024,
-	corsAllowedOrigins: [],
-};
-
-function makeRequest(body: unknown, headers: Record<string, string> = {}): Request {
-	return new Request("http://127.0.0.1:4181/v1/messages", {
-		method: "POST",
-		headers: { "content-type": "application/json", ...headers },
-		body: JSON.stringify(body),
-	});
-}
-
-function jsonResponse(obj: unknown, status = 200): Response {
-	return new Response(JSON.stringify(obj), {
-		status,
-		headers: { "content-type": "application/json" },
-	});
-}
-
-function sseResponse(chunks: string[]): Response {
-	const encoder = new TextEncoder();
-	const stream = new ReadableStream<Uint8Array>({
-		start(controller) {
-			for (const c of chunks) controller.enqueue(encoder.encode(c));
-			controller.close();
-		},
-	});
-	return new Response(stream, {
-		status: 200,
-		headers: { "content-type": "text/event-stream" },
-	});
-}
-
-async function collectStream(res: Response): Promise<string> {
-	const reader = res.body!.getReader();
-	const decoder = new TextDecoder();
-	let acc = "";
-	while (true) {
-		const { done, value } = await reader.read();
-		if (done) break;
-		acc += decoder.decode(value);
-	}
-	return acc;
-}
+import { createServer } from "../src/server";
+import {
+	collectStream,
+	jsonResponse,
+	messagesRequest,
+	simpleBody,
+	sseResponse,
+	stallingSseResponse,
+	testConfig,
+	textResponse,
+} from "./fixtures";
 
 let originalFetch: typeof fetch;
 
@@ -96,27 +24,37 @@ afterEach(() => {
 	globalThis.fetch = originalFetch;
 });
 
+/** Point upstream fetch at a stub and return a call counter. */
+function stubUpstream(impl: (call: number) => Response | Promise<Response>) {
+	let calls = 0;
+	globalThis.fetch = mock(async () => impl(++calls)) as unknown as typeof fetch;
+	return () => calls;
+}
+
+/** Capture the JSON body of each upstream call, in order. */
+function captureBodies(): string[] {
+	const bodies: string[] = [];
+	const inner = globalThis.fetch;
+	globalThis.fetch = mock(async (url: any, init: any) => {
+		bodies.push(init.body);
+		return inner(url, init);
+	}) as unknown as typeof fetch;
+	return bodies;
+}
+
+const okBody = (text: string, id = "chatcmpl-1") =>
+	jsonResponse({
+		id,
+		choices: [{ message: { role: "assistant", content: text }, finish_reason: "stop" }],
+		usage: { prompt_tokens: 5, completion_tokens: 2 },
+	});
+
+// ── Non-streaming ────────────────────────────────────────────────────────────
+
 describe("handleMessages — sync", () => {
 	test("translates a sync request into an Anthropic-shaped response", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse({
-				id: "chatcmpl-1",
-				choices: [
-					{ message: { role: "assistant", content: "Hello" }, finish_reason: "stop" },
-				],
-				usage: { prompt_tokens: 5, completion_tokens: 2 },
-			}),
-		) as unknown as typeof fetch;
-
-		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				messages: [{ role: "user", content: "hi" }],
-			}),
-			baseConfig,
-		);
-
+		stubUpstream(() => okBody("Hello"));
+		const res = await handleMessages(messagesRequest(simpleBody()), testConfig());
 		expect(res.status).toBe(200);
 		const json = (await res.json()) as Record<string, any>;
 		expect(json.type).toBe("message");
@@ -125,84 +63,170 @@ describe("handleMessages — sync", () => {
 		expect(json.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
 	});
 
-	test("returns an error response when upstream answers 200 with an error body", async () => {
-		globalThis.fetch = mock(async () =>
-			jsonResponse({ error: { message: "model overloaded" } }, 200),
-		) as unknown as typeof fetch;
-
-		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				messages: [{ role: "user", content: "hi" }],
-			}),
-			baseConfig,
-		);
-
+	test("surfaces a 200-with-error-body as 502 instead of an empty completion", async () => {
+		stubUpstream(() => jsonResponse({ error: { message: "model overloaded" } }, 200));
+		const res = await handleMessages(messagesRequest(simpleBody()), testConfig());
 		expect(res.status).toBe(502);
-		const json = (await res.json()) as Record<string, any>;
+		const json = (await res.json()) as { error: { type: string; message: string } };
 		expect(json.error.type).toBe("api_error");
 		expect(json.error.message).toContain("model overloaded");
 	});
-});
 
-describe("handleMessages — fallback", () => {
-	test("falls back to the next candidate after a 429", async () => {
-		// Bun passes (url, options) to fetch, so the first arg is a string, not a
-		// Request. Count calls instead of parsing the body.
-		let calls = 0;
-		globalThis.fetch = mock(async () => {
-			calls++;
-			if (calls === 1) {
-				return new Response("rate limited", { status: 429 });
-			}
-			return jsonResponse({
-				id: "chatcmpl-2",
-				choices: [
-					{
-						message: { role: "assistant", content: "fallback ok" },
-						finish_reason: "stop",
-					},
-				],
-				usage: { prompt_tokens: 3, completion_tokens: 1 },
-			});
-		}) as unknown as typeof fetch;
-
+	test("echoes a safe inbound x-request-id so client and proxy logs line up", async () => {
+		stubUpstream(() => okBody("ok"));
 		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				messages: [{ role: "user", content: "hi" }],
-			}),
-			baseConfig,
+			messagesRequest(simpleBody(), { "x-request-id": "client-abc.123" }),
+			testConfig(),
 		);
+		expect(res.headers.get("x-request-id")).toBe("client-abc.123");
+	});
 
-		expect(res.status).toBe(200);
-		const json = (await res.json()) as Record<string, any>;
-		expect(json.content[0]).toEqual({ type: "text", text: "fallback ok" });
+	test("mints its own id when the inbound one is unusable", async () => {
+		stubUpstream(() => okBody("ok"));
+		for (const bad of ["", "has space", "a".repeat(200), "<script>"]) {
+			const res = await handleMessages(
+				messagesRequest(simpleBody(), { "x-request-id": bad }),
+				testConfig(),
+			);
+			// A hostile value must never be reflected verbatim.
+			expect(res.headers.get("x-request-id")).toMatch(/^req_[0-9a-f]{16}$/);
+		}
+	});
+
+	test("clamps max_tokens to the documented ceiling", async () => {
+		stubUpstream(() => okBody("ok"));
+		const bodies = captureBodies();
+		await handleMessages(
+			messagesRequest(simpleBody({ max_tokens: 64_000 })),
+			testConfig(),
+		);
+		expect(JSON.parse(bodies[0]).max_tokens).toBe(16384);
+	});
+
+	test("leaves max_tokens alone when it is already under the ceiling", async () => {
+		stubUpstream(() => okBody("ok"));
+		const bodies = captureBodies();
+		await handleMessages(messagesRequest(simpleBody({ max_tokens: 512 })), testConfig());
+		expect(JSON.parse(bodies[0]).max_tokens).toBe(512);
 	});
 });
 
+// ── Fallback and cooldown ────────────────────────────────────────────────────
+
+describe("handleMessages — fallback", () => {
+	test("falls back to the next candidate after a 429", async () => {
+		const calls = stubUpstream((call) =>
+			call === 1
+				? textResponse("rate limited", 429)
+				: okBody("fallback ok", "chatcmpl-2"),
+		);
+		const res = await handleMessages(messagesRequest(simpleBody()), testConfig());
+		expect(res.status).toBe(200);
+		expect(calls()).toBe(2);
+		expect(((await res.json()) as any).content[0].text).toBe("fallback ok");
+	});
+
+	test("passes the upstream Retry-After through to the client", async () => {
+		const cfg = testConfig({ fallbackModels: [] });
+		stubUpstream(() => textResponse("slow down", 429, { "retry-after": "42" }));
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(res.status).toBe(429);
+		expect(res.headers.get("retry-after")).toBe("42");
+	});
+
+	test("retries across providers, applying the right key to each", async () => {
+		// Kilo fails, so the chain falls through to the allowlisted Qwen model.
+		// Each provider must receive its own credential, never the other's.
+		const cfg = testConfig({
+			defaultModel: "kilo/stealth/space-bunny-alpha",
+			fallbackModels: ["qwen/qwen3-max"],
+			allowedModels: ["kilo/stealth/space-bunny-alpha", "qwen/qwen3-max"],
+		});
+		const auths: string[] = [];
+		let call = 0;
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			auths.push(init.headers.Authorization);
+			return ++call === 1 ? textResponse("nope", 500) : okBody("via qwen");
+		}) as unknown as typeof fetch;
+
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(res.status).toBe(200);
+		expect(auths[0]).toBe("Bearer kilo-key");
+		expect(auths[1]).toBe("Bearer qwen-key");
+	});
+
+	test("a model in cooldown is skipped on the next request", async () => {
+		const cfg = testConfig({ fallbackModels: ["kilo/poolside/laguna-s-2.1:free"] });
+		// The primary 404s (retired) and the fallback answers, so only the
+		// primary is left cooling afterwards.
+		const first = stubUpstream((call) =>
+			call === 1 ? textResponse("gone", 404) : okBody("via fallback", "chatcmpl-2"),
+		);
+		const ok = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(ok.status).toBe(200);
+		expect(first()).toBe(2);
+
+		// Next request: the primary is cooling, so the fallback leads instead of
+		// paying for a guaranteed-failing call first.
+		const models: string[] = [];
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			models.push(JSON.parse(init.body).model);
+			return okBody("x");
+		}) as unknown as typeof fetch;
+		await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(models).toEqual(["poolside/laguna-s-2.1:free"]);
+	});
+
+	test("when every candidate is cooling they are all retried anyway", async () => {
+		// Deliberate fail-open: refusing the request because every model happens
+		// to be in cooldown would be worse than trying one that may have
+		// recovered, since the cooldown may not have been earned recently.
+		const cfg = testConfig({ fallbackModels: ["kilo/poolside/laguna-s-2.1:free"] });
+		stubUpstream((call) =>
+			call === 1 ? textResponse("gone", 404) : okBody("ok", "chatcmpl-2"),
+		);
+		await handleMessages(messagesRequest(simpleBody()), cfg);
+
+		// Now cool *both* models, then confirm the next request still tries.
+		const { getRuntime } = await import("../src/runtime");
+		const { cooldowns } = getRuntime(cfg);
+		cooldowns.fail("kilo/stealth/space-bunny-alpha");
+		cooldowns.fail("kilo/poolside/laguna-s-2.1:free");
+		expect(cooldowns.isCooling("kilo/stealth/space-bunny-alpha")).toBe(true);
+
+		const models: string[] = [];
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			models.push(JSON.parse(init.body).model);
+			return okBody("x");
+		}) as unknown as typeof fetch;
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(res.status).toBe(200);
+		expect(models[0]).toBe("stealth/space-bunny-alpha");
+	});
+
+	test("a 400 is returned to the client without burning the fallback chain", async () => {
+		const calls = stubUpstream(() => textResponse("bad request", 400));
+		const res = await handleMessages(messagesRequest(simpleBody()), testConfig());
+		expect(res.status).toBe(400);
+		expect(calls()).toBe(1);
+	});
+});
+
+// ── Streaming ────────────────────────────────────────────────────────────────
+
 describe("handleMessages — streaming", () => {
 	test("streams Anthropic SSE for a successful upstream stream", async () => {
-		globalThis.fetch = mock(async () =>
+		stubUpstream(() =>
 			sseResponse([
 				'data: {"choices":[{"delta":{"content":"Hi"},"index":0}]}\n\n',
 				'data: {"choices":[{"delta":{},"finish_reason":"stop","index":0}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n',
 				"data: [DONE]\n\n",
 			]),
-		) as unknown as typeof fetch;
-
-		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				stream: true,
-				messages: [{ role: "user", content: "hi" }],
-			}),
-			baseConfig,
 		);
-
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
 		expect(res.status).toBe(200);
 		const out = await collectStream(res);
 		expect(out).toContain("message_start");
@@ -212,279 +236,423 @@ describe("handleMessages — streaming", () => {
 		expect(out).toContain("end_turn");
 	});
 
-	test("emits an SSE error event when the upstream stream carries an error object", async () => {
-		globalThis.fetch = mock(async () =>
-			sseResponse(['data: {"error":{"message":"stream boom"}}\n\n']),
-		) as unknown as typeof fetch;
-
+	test("emits an SSE error when the upstream stream carries an error object", async () => {
+		stubUpstream(() => sseResponse(['data: {"error":{"message":"stream boom"}}\n\n']));
 		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				stream: true,
-				messages: [{ role: "user", content: "hi" }],
-			}),
-			baseConfig,
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
 		);
-
-		expect(res.status).toBe(200);
 		const out = await collectStream(res);
 		expect(out).toContain("event: error");
 		expect(out).toContain("stream boom");
 	});
 
 	test("a streamed tool-calling turn reports stop_reason tool_use", async () => {
-		// Regression: the handler finalized with a hardcoded "stop", discarding the
-		// upstream's finish_reason. Every streamed turn came back end_turn, so
-		// Claude Code never dispatched the tool. Exercised here (not just in the
-		// translator) because the bug lived in this glue, not in finalize().
-		globalThis.fetch = mock(async () =>
+		// Regression: the handler used to finalize with a hardcoded "stop",
+		// discarding the upstream's finish_reason. Every streamed turn came back
+		// end_turn, so Claude Code never dispatched the tool.
+		stubUpstream(() =>
 			sseResponse([
 				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":""}}]},"index":0}]}\n\n',
 				'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":\\"Paris\\"}"}}]},"index":0}]}\n\n',
 				'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"usage":{"prompt_tokens":9,"completion_tokens":7}}\n\n',
 				"data: [DONE]\n\n",
 			]),
-		) as unknown as typeof fetch;
-
-		const res = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				stream: true,
-				messages: [{ role: "user", content: "weather in paris?" }],
-				tools: [
-					{ name: "get_weather", input_schema: { type: "object", properties: {} } },
-				],
-			}),
-			baseConfig,
 		);
-
-		expect(res.status).toBe(200);
+		const res = await handleMessages(
+			messagesRequest(
+				simpleBody({
+					stream: true,
+					tools: [
+						{ name: "get_weather", input_schema: { type: "object", properties: {} } },
+					],
+				}),
+			),
+			testConfig(),
+		);
 		const out = await collectStream(res);
 		expect(out).toContain('"type":"tool_use"');
 		expect(out).toContain('"name":"get_weather"');
 		expect(out).toContain('"stop_reason":"tool_use"');
 		expect(out).not.toContain('"stop_reason":"end_turn"');
-		// Usage from the trailing chunk must still land in message_delta.
 		expect(out).toContain('"output_tokens":7');
+	});
+
+	test("no event is emitted after message_stop", async () => {
+		// A gateway that sends a trailing chunk after [DONE] used to open a new
+		// content block *after* message_stop, which is a protocol violation.
+		stubUpstream(() =>
+			sseResponse([
+				'data: {"choices":[{"delta":{"content":"real"}}]}\n\n',
+				'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+				"data: [DONE]\n\n",
+				'data: {"choices":[{"delta":{"content":"GHOST"}}]}\n\n',
+			]),
+		);
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
+		const out = await collectStream(res);
+		expect(out).toContain("real");
+		expect(out).not.toContain("GHOST");
+		// message_stop must appear exactly once, at the very end of the stream.
+		expect(out.split("message_stop").length - 1).toBe(2); // once in `event:`, once in `data:`
+		expect(out.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
 	});
 });
 
-describe("stream idle deadline", () => {
+// ── Streaming stall ──────────────────────────────────────────────────────────
+
+describe("handleMessages — stream idle deadline", () => {
 	test("a stalled upstream stream is aborted and releases its slot", async () => {
 		// Regression: the header-level timeout is cleared once fetch resolves, so
-		// nothing used to bound the body. A stalled stream pinned its concurrency
-		// slot forever and wedged the proxy after MAX_CONCURRENT_REQUESTS stalls.
-		const cfg: Config = {
-			...baseConfig,
+		// nothing bounded the body. A stalled stream pinned its slot forever.
+		const cfg = testConfig({
 			upstreamTimeoutMs: 150,
 			maxConcurrentRequests: 1,
 			maxQueuedRequests: 0,
 			fallbackModels: [],
-		};
-
-		let resolveStall: (() => void) | undefined;
-		globalThis.fetch = mock(async () => {
-			const stream = new ReadableStream<Uint8Array>({
-				start(controller) {
-					controller.enqueue(
-						new TextEncoder().encode(
-							'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
-						),
-					);
-					// Never close, never send more: the upstream just stops talking.
-					void new Promise<void>((resolve) => {
-						resolveStall = resolve;
-					});
-				},
-			});
-			return new Response(stream, {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			});
-		}) as unknown as typeof fetch;
+		});
+		const stalling = stallingSseResponse();
+		globalThis.fetch = mock(async () => stalling.response) as unknown as typeof fetch;
 
 		const stalled = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				stream: true,
-				messages: [{ role: "user", content: "hi" }],
-			}),
+			messagesRequest(simpleBody({ stream: true })),
 			cfg,
 		);
 		expect(stalled.status).toBe(200);
 
-		const reader = stalled.body!.getReader();
-		const decoder = new TextDecoder();
-		let out = "";
-		// Drain until the deadline fires and the stream terminates.
-		const drained = (async () => {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				out += decoder.decode(value);
-			}
-		})();
-		await Promise.race([drained, Bun.sleep(3000)]);
-		await reader.cancel().catch(() => {});
-		resolveStall?.();
-
+		const out = await Promise.race([collectStream(stalled), Bun.sleep(3000)]);
+		stalling.release();
 		expect(out).toContain("event: error");
 		expect(out).toContain("stalled");
 
-		// The slot must be back: a fresh request now succeeds instead of 429.
-		globalThis.fetch = mock(async () =>
-			jsonResponse({
-				id: "chatcmpl-after",
-				choices: [
-					{ message: { role: "assistant", content: "recovered" }, finish_reason: "stop" },
-				],
-				usage: { prompt_tokens: 1, completion_tokens: 1 },
-			}),
-		) as unknown as typeof fetch;
-
-		const after = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				messages: [{ role: "user", content: "hi again" }],
-			}),
-			cfg,
-		);
+		stubUpstream(() => okBody("recovered", "chatcmpl-after"));
+		const after = await handleMessages(messagesRequest(simpleBody()), cfg);
 		expect(after.status).toBe(200);
 	});
 });
 
-describe("count_tokens does not consume upstream capacity", () => {
-	test("succeeds while every upstream slot is busy", async () => {
-		// Regression: count_tokens shares the upstream RequestLimiter, so a busy
-		// proxy answered Claude Code's own context accounting with 429.
-		const cfg: Config = {
-			...baseConfig,
+// ── count_tokens ─────────────────────────────────────────────────────────────
+
+describe("count_tokens", () => {
+	test("does not consume upstream capacity", async () => {
+		// Regression: count_tokens shared the limiter, so a busy proxy answered
+		// Claude Code's own context accounting with 429.
+		const cfg = testConfig({
 			maxConcurrentRequests: 1,
 			maxQueuedRequests: 0,
 			fallbackModels: [],
-		};
-
-		let resolveStall: (() => void) | undefined;
+		});
+		let stalling!: ReturnType<typeof stallingSseResponse>;
 		globalThis.fetch = mock(async () => {
-			const stream = new ReadableStream<Uint8Array>({
-				start(controller) {
-					controller.enqueue(
-						new TextEncoder().encode('data: {"choices":[{"delta":{"content":"x"}}]}\n\n'),
-					);
-					void new Promise<void>((resolve) => {
-						resolveStall = resolve;
-					});
-				},
-			});
-			return new Response(stream, {
-				status: 200,
-				headers: { "content-type": "text/event-stream" },
-			});
+			stalling = stallingSseResponse("x");
+			return stalling.response;
 		}) as unknown as typeof fetch;
 
-		// Occupy the single slot with a stream that will not finish.
 		const inflight = await handleMessages(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				max_tokens: 100,
-				stream: true,
-				messages: [{ role: "user", content: "hi" }],
-			}),
+			messagesRequest(simpleBody({ stream: true })),
 			cfg,
 		);
 		expect(inflight.status).toBe(200);
 
 		const counted = await handleCountTokens(
-			makeRequest({
-				model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-				messages: [{ role: "user", content: "hello world" }],
-			}),
+			messagesRequest(
+				{ messages: [{ role: "user", content: "hello world" }] },
+				{},
+				"http://127.0.0.1:4181/v1/messages/count_tokens",
+			),
 			cfg,
 		);
-
 		expect(counted.status).toBe(200);
-		const json = (await counted.json()) as { input_tokens: number };
-		expect(json.input_tokens).toBeGreaterThan(0);
+		expect(
+			((await counted.json()) as { input_tokens: number }).input_tokens,
+		).toBeGreaterThan(0);
 
 		await inflight.body?.cancel().catch(() => {});
-		resolveStall?.();
+		stalling.release();
 	});
 
-	test("still rejects an oversized body and invalid JSON", async () => {
-		const tooBig = await handleCountTokens(makeRequest({ messages: [] }), {
-			...baseConfig,
-			maxBodyBytes: 4,
-		});
+	test("never returns a zero-token estimate", async () => {
+		// Claude Code divides by this figure, so 0 would be a divide-by-zero.
+		const counted = await handleCountTokens(
+			messagesRequest({}, {}, "http://127.0.0.1:4181/v1/messages/count_tokens"),
+			testConfig(),
+		);
+		expect(((await counted.json()) as { input_tokens: number }).input_tokens).toBe(1);
+	});
+
+	test("rejects an oversized body and invalid JSON", async () => {
+		const tooBig = await handleCountTokens(
+			messagesRequest(
+				{ messages: [] },
+				{},
+				"http://127.0.0.1:4181/v1/messages/count_tokens",
+			),
+			testConfig({ maxBodyBytes: 4 }),
+		);
 		expect(tooBig.status).toBe(413);
 
-		const bad = new Request("http://127.0.0.1:4181/v1/messages/count_tokens", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: "{not json",
-		});
-		const badRes = await handleCountTokens(bad, baseConfig);
-		expect(badRes.status).toBe(400);
+		const bad = await handleCountTokens(
+			new Request("http://127.0.0.1:4181/v1/messages/count_tokens", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{not json",
+			}),
+			testConfig(),
+		);
+		expect(bad.status).toBe(400);
+	});
+
+	test("requires the proxy key when one is configured", async () => {
+		const res = await handleCountTokens(
+			messagesRequest({}, {}, "http://127.0.0.1:4181/v1/messages/count_tokens"),
+			testConfig({ proxyApiKey: "s3cret" }),
+		);
+		expect(res.status).toBe(401);
 	});
 });
 
-describe("createServer routing & security", () => {
-	test("returns 404 with not_found_error type for unknown routes", async () => {
-		const server = createServer(baseConfig);
-		const res = await server.fetch(new Request("http://127.0.0.1:4181/unknown-endpoint"));
-		server.stop(true);
-		expect(res.status).toBe(404);
-		const json = (await res.json()) as { error: { type: string } };
-		expect(json.error.type).toBe("not_found_error");
+// ── Request validation ───────────────────────────────────────────────────────
+
+describe("handleMessages — validation", () => {
+	test("rejects a non-JSON body with 400", async () => {
+		const res = await handleMessages(
+			new Request("http://127.0.0.1:4181/v1/messages", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: "{not json",
+			}),
+			testConfig(),
+		);
+		expect(res.status).toBe(400);
 	});
 
-	test("health is reachable from loopback when no proxy key is set", async () => {
-		const server = createServer(baseConfig);
+	test("rejects a JSON array or scalar body", async () => {
+		for (const body of ["[]", '"a string"', "42", "null"]) {
+			const res = await handleMessages(
+				new Request("http://127.0.0.1:4181/v1/messages", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body,
+				}),
+				testConfig(),
+			);
+			expect(res.status).toBe(400);
+		}
+	});
+
+	test("rejects a non-array messages field", async () => {
+		const res = await handleMessages(messagesRequest({ messages: "nope" }), testConfig());
+		expect(res.status).toBe(400);
+	});
+
+	test("rejects a non-string model field", async () => {
+		const res = await handleMessages(messagesRequest({ model: 7 }), testConfig());
+		expect(res.status).toBe(400);
+	});
+
+	test("rejects a model outside the allowlist before touching the upstream", async () => {
+		const calls = stubUpstream(() => okBody("should not happen"));
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ model: "kilo/some-paid-model" })),
+			testConfig(),
+		);
+		expect(res.status).toBe(400);
+		expect(calls()).toBe(0);
+	});
+
+	test("requires the proxy key when one is configured", async () => {
+		const res = await handleMessages(
+			messagesRequest(simpleBody()),
+			testConfig({ proxyApiKey: "s3cret" }),
+		);
+		expect(res.status).toBe(401);
+	});
+
+	test("does not forward the proxy key upstream as a provider key", async () => {
+		let auth = "";
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			auth = init.headers.Authorization;
+			return okBody("ok");
+		}) as unknown as typeof fetch;
+		await handleMessages(
+			messagesRequest(simpleBody(), { "x-proxy-api-key": "s3cret" }),
+			testConfig({ proxyApiKey: "s3cret", kiloApiKey: "kilo-key" }),
+		);
+		expect(auth).toBe("Bearer kilo-key");
+	});
+
+	test("uses the client-supplied key only when no proxy key is configured", async () => {
+		let auth = "";
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			auth = init.headers.Authorization;
+			return okBody("ok");
+		}) as unknown as typeof fetch;
+		await handleMessages(
+			messagesRequest(simpleBody(), { "x-api-key": "client-key" }),
+			testConfig({ kiloApiKey: "" }),
+		);
+		expect(auth).toBe("Bearer client-key");
+	});
+
+	test("a request-supplied key is not replayed to a different provider", async () => {
+		// The fallback chain crosses providers; the client key authenticates only
+		// the one it addressed, so a fallback to Qwen must use the configured
+		// Qwen credential (or none) rather than the client's Kilo token.
+		const cfg = testConfig({
+			kiloApiKey: "",
+			qwenApiKey: "qwen-key",
+			defaultModel: "kilo/stealth/space-bunny-alpha",
+			fallbackModels: ["qwen/qwen3-max"],
+			allowedModels: ["kilo/stealth/space-bunny-alpha", "qwen/qwen3-max"],
+		});
+		const auths: string[] = [];
+		let call = 0;
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			auths.push(init.headers.Authorization);
+			return ++call === 1 ? textResponse("kilo down", 500) : okBody("via qwen");
+		}) as unknown as typeof fetch;
+
+		const res = await handleMessages(
+			messagesRequest(simpleBody(), { "x-api-key": "client-key" }),
+			cfg,
+		);
+		expect(res.status).toBe(200);
+		expect(auths[0]).toBe("Bearer client-key");
+		expect(auths[1]).toBe("Bearer qwen-key");
+	});
+
+	test("the client-abort listener is detached once the response is done", async () => {
+		// Regression: the handler removed a *different* closure than the one the
+		// upstream call registered, so the listener survived the request and
+		// accumulated on every call.
+		const controller = new AbortController();
+		let added = 0;
+		let removed = 0;
+		const signal = controller.signal;
+		const originalAdd = signal.addEventListener.bind(signal);
+		const originalRemove = signal.removeEventListener.bind(signal);
+		signal.addEventListener = ((...args: any[]) => {
+			added++;
+			return originalAdd(...(args as [string, EventListener]));
+		}) as typeof signal.addEventListener;
+		signal.removeEventListener = ((...args: any[]) => {
+			removed++;
+			return originalRemove(...(args as [string, EventListener]));
+		}) as typeof signal.removeEventListener;
+
+		stubUpstream(() => okBody("ok"));
+		const req = messagesRequest(simpleBody());
+		Object.defineProperty(req, "signal", { value: signal });
+		await handleMessages(req, testConfig());
+
+		expect(added).toBeGreaterThan(0);
+		expect(removed).toBe(added);
+	});
+});
+
+// ── Routing / security ───────────────────────────────────────────────────────
+
+describe("createServer — routing", () => {
+	test("404 for an unknown route", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(new Request("http://127.0.0.1:4181/nope"));
+		server.stop(true);
+		expect(res.status).toBe(404);
+		expect(((await res.json()) as any).error.type).toBe("not_found_error");
+	});
+
+	test("405 with Allow for a known path under the wrong verb", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(
+			new Request("http://127.0.0.1:4181/health", { method: "POST" }),
+		);
+		server.stop(true);
+		expect(res.status).toBe(405);
+		expect(res.headers.get("allow")).toBe("GET");
+	});
+
+	test("a trailing slash routes the same as the bare path", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(new Request("http://127.0.0.1:4181/health/"));
+		server.stop(true);
+		expect(res.status).toBe(200);
+	});
+
+	test("health is reachable from loopback with no proxy key", async () => {
+		const server = createServer(testConfig());
 		const res = await server.fetch(new Request("http://127.0.0.1:4181/health"));
 		server.stop(true);
 		expect(res.status).toBe(200);
-		const json = (await res.json()) as { status: string };
-		expect(json.status).toBe("ok");
+		expect(((await res.json()) as any).status).toBe("ok");
 	});
 
-	test("health requires the proxy key when one is configured", async () => {
+	test("every operational endpoint requires the key when one is configured", async () => {
 		// Regression: /health echoed the upstream gateway URL and version with no
 		// auth at all, so it leaked on any non-localhost bind.
-		const server = createServer({ ...baseConfig, proxyApiKey: "s3cret" });
-		const anon = await server.fetch(new Request("http://127.0.0.1:4181/health"));
-		expect(anon.status).toBe(401);
-		const authed = await server.fetch(
-			new Request("http://127.0.0.1:4181/health", {
-				headers: { "x-proxy-api-key": "s3cret" },
-			}),
-		);
+		const server = createServer(testConfig({ proxyApiKey: "s3cret" }));
+		const paths = [
+			"/",
+			"/health",
+			"/healthz",
+			"/version",
+			"/v1/models",
+			"/metrics",
+			"/dashboard",
+			"/dashboard.json",
+		];
+		for (const path of paths) {
+			const anon = await server.fetch(new Request(`http://127.0.0.1:4181${path}`));
+			expect(anon.status).toBe(401);
+			const authed = await server.fetch(
+				new Request(`http://127.0.0.1:4181${path}`, {
+					headers: { "x-proxy-api-key": "s3cret" },
+				}),
+			);
+			expect(authed.status).toBe(200);
+		}
 		server.stop(true);
-		expect(authed.status).toBe(200);
 	});
 
 	test("/v1/models reports a stable created timestamp", async () => {
-		const server = createServer(baseConfig);
+		const server = createServer(testConfig());
+		type ModelsPayload = { data: Array<{ id: string; created: number }> };
 		const first = (await (
 			await server.fetch(new Request("http://127.0.0.1:4181/v1/models"))
-		).json()) as {
-			data: Array<{ id: string; created: number }>;
-		};
+		).json()) as ModelsPayload;
 		const second = (await (
 			await server.fetch(new Request("http://127.0.0.1:4181/v1/models"))
-		).json()) as {
-			data: Array<{ id: string; created: number }>;
-		};
+		).json()) as ModelsPayload;
 		server.stop(true);
 		expect(first.data.length).toBeGreaterThan(0);
 		expect(first.data[0].created).toBe(second.data[0].created);
 	});
 
-	test("CORS preflight includes x-proxy-api-key in allowed headers", async () => {
-		const cfg: Config = { ...baseConfig, corsAllowedOrigins: ["http://localhost:3000"] };
-		const server = createServer(cfg);
+	test("/metrics is Prometheus text and never reflects a metric as markup", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(new Request("http://127.0.0.1:4181/metrics"));
+		const body = await res.text();
+		server.stop(true);
+		expect(res.headers.get("content-type")).toContain("text/plain");
+		expect(body.endsWith("\n")).toBe(true);
+	});
+
+	test("the dashboard never injects metric values into markup", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(new Request("http://127.0.0.1:4181/dashboard"));
+		const html = await res.text();
+		server.stop(true);
+		expect(html).toContain("textContent");
+		// innerHTML on interpolated data is the pattern being avoided.
+		expect(html).not.toContain("innerHTML");
+	});
+
+	test("CORS preflight advertises x-proxy-api-key and x-request-id", async () => {
+		const server = createServer(
+			testConfig({ corsAllowedOrigins: ["http://localhost:3000"] }),
+		);
 		const res = await server.fetch(
 			new Request("http://127.0.0.1:4181/v1/messages", {
 				method: "OPTIONS",
@@ -493,7 +661,21 @@ describe("createServer routing & security", () => {
 		);
 		server.stop(true);
 		expect(res.status).toBe(204);
-		const headers = res.headers.get("access-control-allow-headers") ?? "";
-		expect(headers).toContain("x-proxy-api-key");
+		const allow = res.headers.get("access-control-allow-headers") ?? "";
+		expect(allow).toContain("x-proxy-api-key");
+		expect(allow).toContain("x-request-id");
+	});
+
+	test("an unlisted origin is not reflected", async () => {
+		const server = createServer(
+			testConfig({ corsAllowedOrigins: ["http://localhost:3000"] }),
+		);
+		const res = await server.fetch(
+			new Request("http://127.0.0.1:4181/health", {
+				headers: { origin: "https://evil.example" },
+			}),
+		);
+		server.stop(true);
+		expect(res.headers.get("access-control-allow-origin")).toBeNull();
 	});
 });

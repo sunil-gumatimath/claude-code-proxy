@@ -1,6 +1,15 @@
+// ============================================================================
+// errors.ts — Anthropic-shaped error responses
+// ============================================================================
+
 import type { AnthropicErrorBody } from "./types";
 
-export function anthropicError(status: number, type: string, message: string): Response {
+export function anthropicError(
+	status: number,
+	type: string,
+	message: string,
+	headers?: Record<string, string>,
+): Response {
 	const body: AnthropicErrorBody = {
 		type: "error",
 		error: { type, message },
@@ -10,7 +19,15 @@ export function anthropicError(status: number, type: string, message: string): R
 		headers: {
 			"Content-Type": "application/json",
 			"Cache-Control": "no-store",
+			...headers,
 		},
+	});
+}
+
+/** 429 responses tell the client how long to wait instead of guessing. */
+export function rateLimited(message: string, retryAfterSeconds = 1): Response {
+	return anthropicError(429, "rate_limit_error", message, {
+		"retry-after": String(retryAfterSeconds),
 	});
 }
 
@@ -19,7 +36,6 @@ export function mapUpstreamErrorType(status: number): string {
 	if (status === 401 || status === 403) return "authentication_error";
 	if (status === 429) return "rate_limit_error";
 	if (status === 400) return "invalid_request_error";
-	if (status >= 500) return "api_error";
 	return "api_error";
 }
 
@@ -48,5 +64,5 @@ export function extractErrorMessage(err: unknown, fallback: string): string {
 }
 
 export function truncate(s: string, n: number): string {
-	return s.length <= n ? s : s.slice(0, n) + "…";
+	return s.length <= n ? s : `${s.slice(0, n)}…`;
 }
