@@ -20,6 +20,9 @@ const { cyan, green, bold, dim } = colors;
 /** Hard ceiling on max_tokens, independent of what the client asks for. */
 const MAX_OUTPUT_TOKENS = 16384;
 
+/** Sentinel for "the sync body read hit its deadline". */
+const SYNC_BODY_TIMEOUT = Symbol("sync-body-timeout");
+
 const CLIENT_GONE = () => anthropicError(499, "api_error", "Client disconnected.");
 
 export async function handleMessages(req: Request, config: Config): Promise<Response> {
@@ -111,7 +114,7 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 
 		// `detach` removes the client-abort listener that callUpstream registered.
 		// It must run on every exit path, or the listener outlives the request.
-		const { response: upstream, controller, detach } = outcome;
+		const { response: upstream, controller, target, detach } = outcome;
 
 		if (isStream) {
 			const streamRelease = releaseSlot;
@@ -139,6 +142,10 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 				model: originalModel,
 				startTime,
 				requestId,
+				controller,
+				target: displayTarget(target),
+				timeoutMs: config.upstreamTimeoutMs,
+				runtime,
 			});
 		} finally {
 			detach();
@@ -268,42 +275,97 @@ interface SyncArgs {
 	model: string;
 	startTime: number;
 	requestId: string;
+	controller: AbortController;
+	target: string;
+	timeoutMs: number;
+	/** Shared limiter + cooldown table, so a stalled body can cool the model. */
+	runtime: ReturnType<typeof getRuntime>;
 }
 
 async function handleSync(args: SyncArgs): Promise<Response> {
-	const { upstream, model, startTime, requestId } = args;
-	const parsed = (await upstream.json()) as OpenAIChatResponse & {
-		error?: { message?: unknown };
-	};
-	debug("OpenAI response", parsed);
+	const {
+		upstream,
+		model,
+		startTime,
+		requestId,
+		controller,
+		target,
+		timeoutMs,
+		runtime,
+	} = args;
 
-	// Some gateways answer HTTP 200 with an error object in the body. Without
-	// this check the proxy would forward a fabricated empty completion.
-	if (parsed.error) {
-		const msg = extractErrorMessage(parsed.error, "Upstream returned an error");
-		// Counted so a gateway that fails this way shows up in
-		// kilo_proxy_upstream_errors_total rather than looking like success.
-		recordUpstreamError(200);
-		error(`Upstream error: ${redact(msg).slice(0, 200)}`);
-		return anthropicError(502, "api_error", `Upstream error: ${truncate(msg, 2000)}`, {
-			"x-request-id": requestId,
+	// `fetch` resolved on headers, so nothing bounds the body yet. Without this
+	// deadline a non-streaming upstream that stalls mid-body pins its
+	// concurrency slot forever — the streaming path has its own idle timer, but
+	// this one did not, and four stalled syncs wedge the whole proxy.
+	const read = upstream.json();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let timedOut = false;
+	try {
+		const deadline = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => {
+				timedOut = true;
+				// Abort first: that is what actually releases the socket.
+				controller.abort("upstream body timeout");
+				reject(SYNC_BODY_TIMEOUT);
+			}, timeoutMs);
 		});
-	}
+		const parsed = (await Promise.race([read, deadline])) as OpenAIChatResponse & {
+			error?: { message?: unknown };
+		};
+		debug("OpenAI response", parsed);
 
-	const result = translateResponse(parsed, model);
-	const elapsed = (performance.now() - startTime).toFixed(0);
-	log(
-		`${green("←")}   sync ${dim(model)} stop=${result.stop_reason} ` +
-			`in=${result.usage.input_tokens} out=${result.usage.output_tokens} ` +
-			`${dim(`${elapsed}ms`)} ${dim(requestId)}`,
-	);
-	return Response.json(result, {
-		headers: {
-			"Content-Type": "application/json",
-			"Cache-Control": "no-store",
-			"x-request-id": requestId,
-		},
-	});
+		// Some gateways answer HTTP 200 with an error object in the body. Without
+		// this check the proxy would forward a fabricated empty completion.
+		if (parsed.error) {
+			const msg = extractErrorMessage(parsed.error, "Upstream returned an error");
+			// Counted so a gateway that fails this way shows up in
+			// kilo_proxy_upstream_errors_total rather than looking like success.
+			recordUpstreamError(200);
+			error(`Upstream error: ${redact(msg).slice(0, 200)}`);
+			return anthropicError(502, "api_error", `Upstream error: ${truncate(msg, 2000)}`, {
+				"x-request-id": requestId,
+			});
+		}
+
+		const result = translateResponse(parsed, model);
+		const elapsed = (performance.now() - startTime).toFixed(0);
+		log(
+			`${green("←")}   sync ${dim(model)} stop=${result.stop_reason} ` +
+				`in=${result.usage.input_tokens} out=${result.usage.output_tokens} ` +
+				`${dim(`${elapsed}ms`)} ${dim(requestId)}`,
+		);
+		return Response.json(result, {
+			headers: {
+				"Content-Type": "application/json",
+				"Cache-Control": "no-store",
+				"x-request-id": requestId,
+			},
+		});
+	} catch (err) {
+		if (err === SYNC_BODY_TIMEOUT || (timedOut && isAbortish(err))) {
+			// The model stalled mid-body: cool it so the next request prefers a
+			// candidate that is actually answering.
+			runtime.cooldowns.fail(target);
+			recordUpstreamError(504);
+			return anthropicError(
+				504,
+				"api_error",
+				`Upstream timed out after ${timeoutMs}ms while reading the response body.`,
+			);
+		}
+		throw err;
+	} finally {
+		if (timer) clearTimeout(timer);
+		// If the deadline won, the abandoned read will reject on its own once the
+		// abort lands. Mark it handled so that is not an unhandled rejection.
+		if (timedOut) void read.catch(() => {});
+	}
+}
+
+function isAbortish(err: unknown): boolean {
+	const msg = err instanceof Error ? err.message : String(err);
+	return (err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
 }
 
 // ── Failure mapping ─────────────────────────────────────────────────────────

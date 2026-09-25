@@ -111,6 +111,67 @@ describe("handleMessages — sync", () => {
 	});
 });
 
+// ── Body deadline (P0) ───────────────────────────────────────────────────────
+
+describe("handleMessages — sync body deadline", () => {
+	test("a stalled sync body times out and does not pin the slot", async () => {
+		// Regression: `fetch` resolves on headers, so the header-level timeout was
+		// already cleared when the body was read. A non-streaming upstream that
+		// stalled mid-body held its concurrency slot forever, and four of those
+		// wedged the whole proxy with no way to recover.
+		const cfg = testConfig({
+			upstreamTimeoutMs: 120,
+			maxConcurrentRequests: 1,
+			maxQueuedRequests: 0,
+			fallbackModels: [],
+		});
+
+		// Headers immediately, body never.
+		globalThis.fetch = mock(
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start() {
+							/* never enqueue, never close */
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				),
+		) as unknown as typeof fetch;
+
+		const started = performance.now();
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(performance.now() - started).toBeLessThan(3000);
+		expect(res.status).toBe(504);
+
+		// The slot must be back: a fresh request succeeds instead of 429.
+		stubUpstream(() => okBody("recovered", "chatcmpl-after"));
+		const after = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(after.status).toBe(200);
+	});
+
+	test("a stalled sync body marks the model as cooling down", async () => {
+		const cfg = testConfig({ upstreamTimeoutMs: 80, fallbackModels: [] });
+		globalThis.fetch = mock(
+			async () =>
+				new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 }),
+		) as unknown as typeof fetch;
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(res.status).toBe(504);
+		// The next request should not pick the same dead model first.
+		const calls = stubUpstream(() => okBody("second"));
+		await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(calls()).toBeGreaterThan(0);
+	});
+
+	test("a sync response that arrives in time is unaffected", async () => {
+		const cfg = testConfig({ upstreamTimeoutMs: 5000 });
+		stubUpstream(() => okBody("fast enough"));
+		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(res.status).toBe(200);
+	});
+});
+
 // ── Fallback and cooldown ────────────────────────────────────────────────────
 
 describe("handleMessages — fallback", () => {
