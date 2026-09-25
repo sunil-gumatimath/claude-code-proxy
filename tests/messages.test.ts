@@ -8,9 +8,9 @@ import {
 	isTargetAllowed,
 	resolveTarget,
 } from "../src/handlers/messages";
+import { getCapabilities, isFreeTarget, qualifyModel } from "../src/providers";
+import { prometheusMetrics, RequestLimiter, recordModelRequest } from "../src/runtime";
 import type { AnthropicMessagesRequest } from "../src/types";
-import { qualifyModel, getCapabilities, isFreeTarget } from "../src/providers";
-import { RequestLimiter, prometheusMetrics, recordModelRequest } from "../src/runtime";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -622,7 +622,7 @@ describe("prometheusMetrics", () => {
 	test("formats Prometheus metrics with latency and escaped labels", () => {
 		recordModelRequest("test\rprovider/test\nmodel");
 		const out = prometheusMetrics();
-		expect(out).toContain("kilo_proxy_request_duration_ms_total");
+		expect(out).toContain("kilo_proxy_request_duration_ms_sum");
 		expect(out).toContain("kilo_proxy_requests_total");
 		expect(out).not.toContain("\r");
 	});
