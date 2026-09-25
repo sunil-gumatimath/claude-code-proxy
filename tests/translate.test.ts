@@ -474,13 +474,86 @@ describe("translateResponse", () => {
 			},
 			"m",
 		);
-		// thinking block comes first (unshifted)
+		// thinking block comes first (unshifted). Anthropic requires a signature
+		// on thinking blocks; the proxy synthesizes a deterministic placeholder
+		// because it has no upstream signature to forward.
 		expect(out.content[0]).toEqual({
 			type: "thinking",
 			thinking: "Let me think step by step...",
+			signature: expect.any(String) as unknown as string,
 		});
+		expect((out.content[0] as { signature: string }).signature.length).toBeGreaterThan(0);
 		expect(out.content[1]).toEqual({ type: "text", text: "Here's my answer" });
 		expect(out.stop_reason).toBe("end_turn");
+	});
+
+	test("thinking signature is stable for identical reasoning text", () => {
+		const build = () =>
+			translateResponse(
+				{
+					choices: [
+						{
+							message: {
+								role: "assistant",
+								content: "ok",
+								reasoning_content: "same reasoning",
+							},
+							finish_reason: "stop",
+						},
+					],
+				},
+				"m",
+			).content[0] as { signature: string };
+		expect(build().signature).toBe(build().signature);
+	});
+
+	test("synthesizes a tool_use id when the upstream omits one", () => {
+		// A tool_use without an id is dropped by JSON.stringify, leaving an
+		// invalid block that Claude Code cannot dispatch.
+		const out = translateResponse(
+			{
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: null as unknown as string,
+							tool_calls: [
+								{ type: "function", function: { name: "get_weather", arguments: "{}" } },
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+			},
+			"m",
+		);
+		const toolUse = out.content.find((b) => b.type === "tool_use") as
+			| { id?: string; name?: string }
+			| undefined;
+		expect(toolUse).toBeDefined();
+		expect(toolUse?.id).toMatch(/^toolu_/);
+		expect(toolUse?.name).toBe("get_weather");
+	});
+
+	test("drops a tool call the upstream left nameless", () => {
+		const out = translateResponse(
+			{
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: "text",
+							tool_calls: [
+								{ type: "function", function: { name: "", arguments: "{}" } },
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+			},
+			"m",
+		);
+		expect(out.content.some((b) => b.type === "tool_use")).toBe(false);
 	});
 
 	test("handles empty choices gracefully", () => {

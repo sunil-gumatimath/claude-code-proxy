@@ -30,11 +30,23 @@ export interface AnthropicToolResultBlock {
   is_error?: boolean;
 }
 
+/**
+ * Thinking block. `signature` is required by the Anthropic schema; this proxy
+ * synthesizes a deterministic placeholder because it has no upstream signature
+ * to forward (see thinkingSignature in translate.ts).
+ */
+export interface AnthropicThinkingBlock {
+  type: "thinking";
+  thinking: string;
+  signature?: string;
+}
+
 export type AnthropicContentBlock =
   | AnthropicTextBlock
   | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock
+  | AnthropicThinkingBlock
   | { type: string; [key: string]: unknown };
 
 export interface AnthropicMessage {
@@ -86,7 +98,11 @@ export interface AnthropicMessageResponse {
 }
 
 export interface OpenAIToolCall {
-  id: string;
+  /**
+   * Optional: some OpenAI-compatible gateways omit the id (typically on a
+   * trailing chunk), so the translator must tolerate its absence.
+   */
+  id?: string;
   type: "function";
   function: { name: string; arguments: string };
   index?: number;

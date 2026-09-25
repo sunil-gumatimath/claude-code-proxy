@@ -2,12 +2,14 @@
 // translate.ts — Anthropic Messages API ↔ OpenAI Chat Completions translator
 // ============================================================================
 
+import { createHash } from "node:crypto";
 import type {
 	AnthropicContentBlock,
 	AnthropicMessage,
 	AnthropicMessageResponse,
 	AnthropicMessagesRequest,
 	AnthropicTextBlock,
+	AnthropicThinkingBlock,
 	OpenAIChatRequest,
 	OpenAIChatResponse,
 	OpenAIChoice,
@@ -68,8 +70,8 @@ export function translateRequest(
 	if (reasoningEffort) {
 		// REASONING_EFFORT is an explicit operator override — applied even when
 		// the client sends no thinking (Claude Code may not enable it for
-		// unrecognized models). "xhigh" is the OpenAI-standard max; OpenRouter
-		// and the OpenCode Zen gateway map it to DeepSeek's "max" effort.
+		// unrecognized models). "xhigh" is the OpenAI-standard max; gateways
+		// that speak DeepSeek's vocabulary map it to their own "max" effort.
 		openai.reasoning_effort = reasoningEffort;
 	} else if (body.thinking?.type === "enabled") {
 		const budget = body.thinking.budget_tokens ?? 0;
@@ -341,14 +343,21 @@ export function translateResponse(
 	}
 
 	if (choice.message?.reasoning_content) {
-		content.unshift({
+		const thinking = String(choice.message.reasoning_content);
+		const block: AnthropicThinkingBlock = {
 			type: "thinking",
-			thinking: String(choice.message.reasoning_content),
-		});
+			thinking,
+			signature: thinkingSignature(thinking),
+		};
+		content.unshift(block);
 	}
 
 	if (choice.message?.tool_calls) {
 		for (const tc of choice.message.tool_calls) {
+			const name = tc.function?.name;
+			// A tool call with no name cannot be dispatched by the client —
+			// drop it instead of emitting a block it cannot act on.
+			if (!name) continue;
 			let input: unknown = {};
 			try {
 				input = JSON.parse(tc.function.arguments || "{}");
@@ -357,8 +366,12 @@ export function translateResponse(
 			}
 			content.push({
 				type: "tool_use",
-				id: tc.id,
-				name: tc.function.name,
+				// `id` is required by the Anthropic schema, but some gateways omit
+				// it (typically on a trailing chunk). Synthesize a stable id rather
+				// than emit `id: undefined`, which JSON.stringify drops entirely and
+				// leaves an invalid tool_use block.
+				id: tc.id || `toolu_${uid()}`,
+				name,
 				input,
 			});
 		}
@@ -753,6 +766,17 @@ function mapFinishReason(reason: string | null): string {
 
 function sse(event: string, data: unknown): string {
 	return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * Anthropic requires an opaque `signature` on thinking blocks. This proxy has
+ * no upstream signature to forward, so derive a deterministic placeholder: the
+ * client needs the field present — and stable, so the value survives an echo —
+ * for the block to be schema-valid. It carries no cryptographic meaning and is
+ * never forwarded upstream.
+ */
+function thinkingSignature(thinking: string): string {
+	return createHash("sha256").update(thinking, "utf8").digest("hex").slice(0, 32);
 }
 
 export function uid(): string {
