@@ -5,7 +5,11 @@ import type { Config } from "../src/config";
 import { resetRuntimeForTests } from "../src/runtime";
 const baseConfig: Config = {
   host: "127.0.0.1",
-  port: 4181,
+  // Bind an ephemeral port. createServer() calls Bun.serve for real, so pinning
+  // 4181 made `bun test` fail with EADDRINUSE whenever a proxy was running on
+  // the default port. server.fetch() dispatches in-process by path, so the
+  // port in the request URLs below is irrelevant.
+  port: 0,
   kiloApiKey: "kilo-key",
   qwenApiKey: "qwen-key",
   qwenBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
