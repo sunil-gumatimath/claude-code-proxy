@@ -30,39 +30,37 @@ export function isAbortError(err: unknown): boolean {
 }
 
 /**
- * Whether a failed status is worth retrying on the next candidate.
+ * Whether an upstream status says something about the *model or provider*
+ * rather than about the request.
  *
  * 404 = model retired/renamed, 403/402 = quota exhausted or free tier blocked,
  * 429 = rate limit, 408 = gateway timeout, 5xx = server error. A 400 is the
- * client's fault and would fail identically on every candidate, so retrying it
- * just multiplies the latency of a doomed request.
+ * client's fault and would fail identically on every candidate, so treating it
+ * as transient would only multiply the latency of a doomed request.
+ *
+ * This is the single definition of "transient", shared by the two decisions
+ * that depend on it: retry on the next candidate, and cool the model down. They
+ * were two hand-written lists of the same six statuses, free to drift apart and
+ * skip a cooldown for a status that was still being retried.
  */
+export function isTransientStatus(status: number): boolean {
+	return (
+		status === 404 ||
+		status === 408 ||
+		status === 429 ||
+		status === 403 ||
+		status === 402 ||
+		status >= 500
+	);
+}
+
+/** Whether a failed status is worth retrying on the next candidate. */
 export function canFallback(
 	status: number,
 	attempt: number,
 	totalAttempts: number,
 ): boolean {
-	return (
-		attempt < totalAttempts - 1 &&
-		(status === 404 ||
-			status === 408 ||
-			status === 429 ||
-			status === 403 ||
-			status === 402 ||
-			status >= 500)
-	);
-}
-
-/** Upstream statuses that mark the model unhealthy for MODEL_COOLDOWN_MS. */
-function marksCooldown(status: number): boolean {
-	return (
-		status === 429 ||
-		status === 402 ||
-		status === 403 ||
-		status === 404 ||
-		status === 408 ||
-		status >= 500
-	);
+	return attempt < totalAttempts - 1 && isTransientStatus(status);
 }
 
 export type UpstreamOutcome =
@@ -183,7 +181,7 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 
 			const errText = await response.text();
 			recordUpstreamError(response.status);
-			if (marksCooldown(response.status)) cooldowns.fail(displayTarget(target));
+			if (isTransientStatus(response.status)) cooldowns.fail(displayTarget(target));
 			clearTimeout(headerTimer);
 			signal.removeEventListener("abort", abortUpstream);
 

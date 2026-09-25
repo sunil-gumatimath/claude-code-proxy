@@ -14,7 +14,7 @@ export const colors = { dim, cyan, green, red, yellow, bold };
 let debugEnabled = false;
 
 /** JSON-shaped projection of an arbitrary logged value, after redaction. */
-export type SanitizedValue =
+type SanitizedValue =
 	| string
 	| number
 	| boolean

@@ -13,7 +13,7 @@ import { translateRequest, translateResponse, uid } from "../translate";
 import type { AnthropicMessagesRequest, OpenAIChatResponse } from "../types";
 import { BODY_ABORTED, BODY_TOO_LARGE, isBodyError, readBodyLimited } from "./body";
 import { handleStream } from "./stream";
-import { callUpstream } from "./upstream";
+import { callUpstream, isAbortError } from "./upstream";
 
 const { cyan, green, bold, dim } = colors;
 
@@ -343,7 +343,7 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 			},
 		});
 	} catch (err) {
-		if (err === SYNC_BODY_TIMEOUT || (timedOut && isAbortish(err))) {
+		if (err === SYNC_BODY_TIMEOUT || (timedOut && isAbortError(err))) {
 			// The model stalled mid-body: cool it so the next request prefers a
 			// candidate that is actually answering.
 			runtime.cooldowns.fail(target);
@@ -361,11 +361,6 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 		// abort lands. Mark it handled so that is not an unhandled rejection.
 		if (timedOut) void read.catch(() => {});
 	}
-}
-
-function isAbortish(err: unknown): boolean {
-	const msg = err instanceof Error ? err.message : String(err);
-	return (err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
 }
 
 // ── Failure mapping ─────────────────────────────────────────────────────────

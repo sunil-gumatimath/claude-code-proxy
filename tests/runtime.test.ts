@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { canFallback, isAbortError } from "../src/handlers/upstream";
+import { canFallback, isAbortError, isTransientStatus } from "../src/handlers/upstream";
 import {
 	getMetrics,
 	getRuntime,
@@ -13,6 +13,30 @@ import {
 import { testConfig } from "./fixtures";
 
 // ── canFallback ──────────────────────────────────────────────────────────────
+
+describe("isTransientStatus", () => {
+	// This predicate is the single definition of "the model or provider is
+	// unwell, not the request". It drives both the retry decision and the
+	// cooldown, so the two cannot disagree about which statuses qualify.
+	test("model- and provider-level failures are transient", () => {
+		for (const status of [402, 403, 404, 408, 429, 500, 502, 503, 504]) {
+			expect(isTransientStatus(status)).toBe(true);
+		}
+	});
+
+	test("client errors are not transient", () => {
+		for (const status of [400, 401, 405, 409, 413, 422]) {
+			expect(isTransientStatus(status)).toBe(false);
+		}
+	});
+
+	test("canFallback agrees with it whenever attempts remain", () => {
+		// The invariant that the two hand-written status lists used to violate.
+		for (const status of [200, 400, 401, 402, 403, 404, 408, 429, 500, 503]) {
+			expect(canFallback(status, 0, 2)).toBe(isTransientStatus(status));
+		}
+	});
+});
 
 describe("canFallback", () => {
 	test("transient statuses with attempts left → true", () => {

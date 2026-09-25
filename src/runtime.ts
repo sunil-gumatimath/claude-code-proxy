@@ -281,17 +281,3 @@ export function resetRuntimeForTests(): void {
 	cached = undefined;
 	cachedKey = "";
 }
-
-/** Zero the process counters. Test-only; production counters are cumulative. */
-export function resetMetricsForTests(): void {
-	metrics.requestsTotal = 0;
-	metrics.requestsActive = 0;
-	metrics.streamsActive = 0;
-	metrics.fallbacksTotal = 0;
-	metrics.upstreamErrorsTotal = 0;
-	metrics.rateLimitsTotal = 0;
-	metrics.queuedRequests = 0;
-	metrics.totalLatencyMs = 0;
-	metrics.completedRequests = 0;
-	metrics.modelRequests = {};
-}
