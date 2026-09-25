@@ -9,12 +9,11 @@ import {
 	resolveTarget,
 } from "../src/handlers/messages";
 import type { AnthropicMessagesRequest } from "../src/types";
-import { qualifyModel } from "../src/providers";
+import { qualifyModel, getCapabilities, isFreeTarget } from "../src/providers";
 import {
 	RequestLimiter,
 	prometheusMetrics,
 	recordModelRequest,
-	resetRuntimeForTests,
 } from "../src/runtime";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
@@ -23,8 +22,8 @@ const defaultConfig: Config = {
 	host: "127.0.0.1",
 	port: 4181,
 	kiloApiKey: "kilo-key",
-	opencodeApiKey: "oc-key",
-	opencodeBaseUrl: "https://opencode.ai/zen/v1",
+	qwenApiKey: "qwen-key",
+	qwenBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
 	proxyApiKey: "",
 	kiloBaseUrl: "https://api.kilo.ai/api/gateway",
 	modelPrefix: "",
@@ -33,26 +32,20 @@ const defaultConfig: Config = {
 		"kilo/poolside/laguna-s-2.1:free",
 		"kilo/cohere/north-mini-code:free",
 		"kilo/stepfun/step-3.7-flash:free",
-		"opencode/deepseek-v4-flash-free",
-		"opencode/longcat-2.0-free",
-		"opencode/laguna-s-2.1-free",
+		"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 	],
 	allowedModels: [
-		"opencode/deepseek-v4-flash-free",
-		"opencode/longcat-2.0-free",
-		"opencode/mimo-v2.5-free",
-		"opencode/north-mini-code-free",
-		"opencode/nemotron-3-ultra-free",
-		"opencode/laguna-s-2.1-free",
-		"kilo/stepfun/step-3.7-flash:free",
+		"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 		"kilo/poolside/laguna-s-2.1:free",
 		"kilo/cohere/north-mini-code:free",
-		"kilo/stealth/ox-alpha",
+		"kilo/stepfun/step-3.7-flash:free",
+		"kilo/stealth/space-bunny-alpha",
 	],
 	freeModelsOnly: true,
+	visionModel: "kilo/stepfun/step-3.7-flash:free",
 	modelAliases: [
 		{ pattern: "*haiku*", model: "kilo/stepfun/step-3.7-flash:free" },
-		{ pattern: "*sonnet*", model: "opencode/deepseek-v4-flash-free" },
+		{ pattern: "*sonnet*", model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free" },
 		{ pattern: "*opus*", model: "kilo/poolside/laguna-s-2.1:free" },
 	],
 	reasoningEffort: "",
@@ -196,19 +189,19 @@ describe("isTargetAllowed", () => {
 	test("free model in allowed list → true", () => {
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 				cfg,
 			),
 		).toBe(true);
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "laguna-s-2.1-free" },
+				{ provider: "kilo", model: "poolside/laguna-s-2.1:free" },
 				cfg,
 			),
 		).toBe(true);
 		expect(
 			isTargetAllowed(
-				{ provider: "kilo", model: "stealth/ox-alpha" },
+				{ provider: "kilo", model: "stealth/space-bunny-alpha" },
 				cfg,
 			),
 		).toBe(true);
@@ -224,7 +217,7 @@ describe("isTargetAllowed", () => {
 		const cfgLax = request({ freeModelsOnly: false, allowedModels: [] });
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "some-unknown-free" },
+				{ provider: "kilo", model: "some-unknown-free" },
 				cfgLax,
 			),
 		).toBe(true);
@@ -232,11 +225,11 @@ describe("isTargetAllowed", () => {
 
 	test("model not in allowedModels list → false", () => {
 		const cfgRestricted = request({
-			allowedModels: ["opencode/deepseek-v4-flash-free"],
+			allowedModels: ["kilo/nvidia/nemotron-3-ultra-550b-a55b:free"],
 		});
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "longcat-2.0-free" },
+				{ provider: "kilo", model: "poolside/laguna-s-2.1:free" },
 				cfgRestricted,
 			),
 		).toBe(false);
@@ -244,16 +237,16 @@ describe("isTargetAllowed", () => {
 
 	test("explicitly allowlisted paid model passes freeModelsOnly", () => {
 		const cfgPaid = request({
-			allowedModels: ["opencode/deepseek-v4-flash"],
+			allowedModels: ["qwen/qwen3-max"],
 		});
 		expect(
-			isTargetAllowed({ provider: "opencode", model: "deepseek-v4-flash" }, cfgPaid),
+			isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgPaid),
 		).toBe(true);
 	});
 
 	test("paid model not allowlisted rejected under freeModelsOnly", () => {
 		expect(
-			isTargetAllowed({ provider: "opencode", model: "deepseek-v4-flash" }, request()),
+			isTargetAllowed({ provider: "kilo", model: "nvidia/nemotron-paid" }, request()),
 		).toBe(false);
 	});
 
@@ -261,10 +254,24 @@ describe("isTargetAllowed", () => {
 		const cfgPermissive = request({ allowedModels: [] });
 		expect(
 			isTargetAllowed(
-				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ provider: "kilo", model: "openrouter/free" },
 				cfgPermissive,
 			),
 		).toBe(true);
+	});
+
+	// Regression: Qwen/DashScope has a promotional token quota but no free
+	// model tier, so it must never slip through the free-only gate.
+	test("qwen model is rejected by freeModelsOnly even with no allowlist", () => {
+		const cfgOpen = request({ allowedModels: [] });
+		expect(isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgOpen)).toBe(false);
+		expect(isTargetAllowed({ provider: "qwen", model: "qwen3.8-max" }, cfgOpen)).toBe(false);
+		expect(isFreeTarget({ provider: "qwen", model: "qwen3-max" })).toBe(false);
+	});
+
+	test("unknown qwen model fails closed under freeModelsOnly", () => {
+		const cfgOpen = request({ allowedModels: [] });
+		expect(isTargetAllowed({ provider: "qwen", model: "brand-new-model" }, cfgOpen)).toBe(false);
 	});
 });
 
@@ -272,14 +279,20 @@ describe("isTargetAllowed", () => {
 
 describe("resolveTarget", () => {
 	test("provider-qualified model returns that target", () => {
-		const target = resolveTarget("opencode/longcat-2.0-free", {}, request());
-		expect(target.provider).toBe("opencode");
-		expect(target.model).toBe("longcat-2.0-free");
+		const target = resolveTarget("qwen/qwen3.7-max", {}, request());
+		expect(target.provider).toBe("qwen");
+		expect(target.model).toBe("qwen3.7-max");
 	});
 
-	test("explicit opencode model skips smart routing", () => {
-		const target = resolveTarget("opencode/deepseek-v4-flash-free", {}, request());
-		expect(target.provider).toBe("opencode");
+	test("dashscope prefix is canonicalized to qwen", () => {
+		const target = resolveTarget("dashscope/qwen3.7-max", {}, request());
+		expect(target.provider).toBe("qwen");
+		expect(target.model).toBe("qwen3.7-max");
+	});
+
+	test("explicit qwen model skips smart routing", () => {
+		const target = resolveTarget("qwen/qwen3.7-max", {}, request());
+		expect(target.provider).toBe("qwen");
 	});
 
 	test("claude model with image and smart routing → Kilo Stepfun", () => {
@@ -299,10 +312,30 @@ describe("resolveTarget", () => {
 		expect(target.model).toBe("stepfun/step-3.7-flash:free");
 	});
 
+	test("claude model with image honours a custom VISION_MODEL", () => {
+		const body: AnthropicMessagesRequest = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+					],
+				},
+			],
+		};
+		const target = resolveTarget(
+			"claude-sonnet-4-20250514",
+			body,
+			request({ visionModel: "kilo/openrouter/free" }),
+		);
+		expect(target.provider).toBe("kilo");
+		expect(target.model).toBe("openrouter/free");
+	});
+
 	test("claude model with alias match → aliased target", () => {
 		const target = resolveTarget("claude-sonnet-4-20250514", { messages: [{ role: "user", content: "hi" }] }, request());
-		expect(target.provider).toBe("opencode");
-		expect(target.model).toBe("deepseek-v4-flash-free");
+		expect(target.provider).toBe("kilo");
+		expect(target.model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
 	});
 
 	test("claude model without matching alias → explicit target", () => {
@@ -335,14 +368,14 @@ describe("resolveTarget", () => {
 describe("buildCandidateTargets", () => {
 	test("first target + fallbacks deduped by displayTarget", () => {
 		const targets = buildCandidateTargets(
-			{ provider: "opencode", model: "deepseek-v4-flash-free" },
+			{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 			{ messages: [{ role: "user", content: "hi" }] },
 			request(),
 		);
 		// First entry should be the requested target
 		expect(targets[0]).toMatchObject({
-			provider: "opencode",
-			model: "deepseek-v4-flash-free",
+			provider: "kilo",
+			model: "nvidia/nemotron-3-ultra-550b-a55b:free",
 		});
 		// At least one fallback present
 		expect(targets.length).toBeGreaterThan(1);
@@ -351,13 +384,13 @@ describe("buildCandidateTargets", () => {
 	test("dedup removes duplicate entries", () => {
 		const cfgDuplicates = request({
 			fallbackModels: [
-				"opencode/deepseek-v4-flash-free", // same as first target
+				"kilo/nvidia/nemotron-3-ultra-550b-a55b:free", // same as first target
 				"kilo/poolside/laguna-m.1:free",
 				"kilo/poolside/laguna-m.1:free", // explicit dup
 			],
 		});
 		const targets = buildCandidateTargets(
-			{ provider: "opencode", model: "deepseek-v4-flash-free" },
+			{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 			{ messages: [{ role: "user", content: "hi" }] },
 			cfgDuplicates,
 		);
@@ -367,7 +400,7 @@ describe("buildCandidateTargets", () => {
 
 	test("explicitly allowlisted paid model survives freeModelsOnly", () => {
 		const cfgPaid = request({
-			allowedModels: ["kilo/paid-model", "opencode/deepseek-v4-flash-free"],
+			allowedModels: ["kilo/paid-model", "kilo/nvidia/nemotron-3-ultra-550b-a55b:free"],
 			fallbackModels: ["kilo/paid-model"],
 		});
 		const targets = buildCandidateTargets(
@@ -381,7 +414,7 @@ describe("buildCandidateTargets", () => {
 
 	test("unapproved paid model filtered out under freeModelsOnly", () => {
 		const cfgPaid = request({
-			allowedModels: ["opencode/deepseek-v4-flash-free"],
+			allowedModels: ["kilo/nvidia/nemotron-3-ultra-550b-a55b:free"],
 			fallbackModels: ["kilo/paid-model"],
 		});
 		const targets = buildCandidateTargets(
@@ -392,25 +425,72 @@ describe("buildCandidateTargets", () => {
 		expect(targets.length).toBe(0);
 	});
 
+	// Regression: with no allowlist, a paid Qwen model must not become a
+	// candidate merely because a QWEN_API_KEY happens to be configured.
+	test("paid qwen model is not a candidate without an explicit opt-in", () => {
+		const cfgOpen = request({ allowedModels: [] });
+		const targets = buildCandidateTargets(
+			{ provider: "qwen", model: "qwen3-max" },
+			{ messages: [{ role: "user", content: "hi" }] },
+			cfgOpen,
+		);
+		const ids = targets.map((t) => `${t.provider}/${t.model}`);
+		expect(ids).not.toContain("qwen/qwen3-max");
+		// The free Kilo fallbacks are untouched.
+		expect(ids).toContain("kilo/nvidia/nemotron-3-ultra-550b-a55b:free");
+	});
+
+	test("allowlisted qwen model becomes a candidate", () => {
+		const cfgPaid = request({
+			allowedModels: ["qwen/qwen3-max"],
+			fallbackModels: [],
+		});
+		const targets = buildCandidateTargets(
+			{ provider: "qwen", model: "qwen3-max" },
+			{ messages: [{ role: "user", content: "hi" }] },
+			cfgPaid,
+		);
+		expect(targets).toHaveLength(1);
+	});
+
 	test("filters out targets lacking tool capability when tools requested", () => {
 		const targets = buildCandidateTargets(
-			{ provider: "opencode", model: "deepseek-v4-flash-free" },
+			{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 			{
 				messages: [{ role: "user", content: "hi" }],
 				tools: [{ name: "get_weather", input_schema: {} }],
 			},
 			request(),
 		);
-		// opencode/deepseek-v4-flash-free supports tools (true in capabilities)
+		// kilo/nvidia/nemotron-3-ultra-550b-a55b:free supports tools (true in capabilities)
 		expect(targets.length).toBeGreaterThanOrEqual(1);
 	});
 
+	test("filters out non-vision targets when the request carries an image", () => {
+		const targets = buildCandidateTargets(
+			{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+						],
+					},
+				],
+			},
+			request(),
+		);
+		// Nemotron Ultra is text-only, so only vision-capable candidates survive
+		expect(targets.every((t) => getCapabilities(t).vision)).toBe(true);
+	});
+
 	test("request-supplied API key enables a provider with no config key", () => {
-		const cfgNoKeys = request({ kiloApiKey: "", opencodeApiKey: "" });
+		const cfgNoKeys = request({ kiloApiKey: "", qwenApiKey: "" });
 		// Without a request key: no provider enabled → no candidates
 		expect(
 			buildCandidateTargets(
-				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 				{ messages: [{ role: "user", content: "hi" }] },
 				cfgNoKeys,
 			),
@@ -418,7 +498,7 @@ describe("buildCandidateTargets", () => {
 		// With a request key: candidates are enabled (README header-key mode)
 		expect(
 			buildCandidateTargets(
-				{ provider: "opencode", model: "deepseek-v4-flash-free" },
+				{ provider: "kilo", model: "nvidia/nemotron-3-ultra-550b-a55b:free" },
 				{ messages: [{ role: "user", content: "hi" }] },
 				cfgNoKeys,
 				"sk-request-key",
@@ -447,14 +527,14 @@ describe("qualifyModel", () => {
 		).toBe("anthropic/claude-sonnet-4");
 	});
 
-	test("opencode target ignores MODEL_PREFIX", () => {
+	test("qwen target ignores MODEL_PREFIX", () => {
 		const cfg = request({ modelPrefix: "anthropic/" });
 		expect(
 			qualifyModel(
-				{ provider: "opencode", model: "deepseek-v4-flash" },
+				{ provider: "qwen", model: "qwen3.7-max" },
 				cfg,
 			),
-		).toBe("deepseek-v4-flash");
+		).toBe("qwen3.7-max");
 	});
 
 	test("no MODEL_PREFIX leaves model untouched", () => {

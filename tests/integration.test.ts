@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { handleMessages } from "../src/handlers/messages";
+import { handleMessages, handleCountTokens } from "../src/handlers/messages";
 import { createServer } from "../src/server";
 import type { Config } from "../src/config";
 import { resetRuntimeForTests } from "../src/runtime";
@@ -7,32 +7,25 @@ const baseConfig: Config = {
   host: "127.0.0.1",
   port: 4181,
   kiloApiKey: "kilo-key",
-  opencodeApiKey: "oc-key",
-  opencodeBaseUrl: "https://opencode.ai/zen/v1",
+  qwenApiKey: "qwen-key",
+  qwenBaseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
   proxyApiKey: "",
   kiloBaseUrl: "https://api.kilo.ai/api/gateway",
   modelPrefix: "",
-  defaultModel: "claude-sonnet-4-20250514",
+  defaultModel: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
   fallbackModels: [
     "kilo/poolside/laguna-s-2.1:free",
     "kilo/cohere/north-mini-code:free",
     "kilo/stepfun/step-3.7-flash:free",
-    "opencode/deepseek-v4-flash-free",
-    "opencode/longcat-2.0-free",
-    "opencode/laguna-s-2.1-free",
   ],
   allowedModels: [
-    "opencode/deepseek-v4-flash-free",
-    "opencode/longcat-2.0-free",
-    "opencode/mimo-v2.5-free",
-    "opencode/north-mini-code-free",
-    "opencode/nemotron-3-ultra-free",
-    "opencode/laguna-s-2.1-free",
-    "kilo/stepfun/step-3.7-flash:free",
+    "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
     "kilo/poolside/laguna-s-2.1:free",
     "kilo/cohere/north-mini-code:free",
+    "kilo/stepfun/step-3.7-flash:free",
   ],
   freeModelsOnly: true,
+  visionModel: "kilo/stepfun/step-3.7-flash:free",
   modelAliases: [],
   reasoningEffort: "",
   smartRouting: true,
@@ -113,7 +106,7 @@ describe("handleMessages — sync", () => {
 
     const res = await handleMessages(
       makeRequest({
-        model: "opencode/deepseek-v4-flash-free",
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
         max_tokens: 100,
         messages: [{ role: "user", content: "hi" }],
       }),
@@ -135,7 +128,7 @@ describe("handleMessages — sync", () => {
 
     const res = await handleMessages(
       makeRequest({
-        model: "opencode/deepseek-v4-flash-free",
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
         max_tokens: 100,
         messages: [{ role: "user", content: "hi" }],
       }),
@@ -170,7 +163,7 @@ describe("handleMessages — fallback", () => {
 
     const res = await handleMessages(
       makeRequest({
-        model: "opencode/deepseek-v4-flash-free",
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
         max_tokens: 100,
         messages: [{ role: "user", content: "hi" }],
       }),
@@ -195,7 +188,7 @@ describe("handleMessages — streaming", () => {
 
     const res = await handleMessages(
       makeRequest({
-        model: "opencode/deepseek-v4-flash-free",
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
         max_tokens: 100,
         stream: true,
         messages: [{ role: "user", content: "hi" }],
@@ -219,7 +212,7 @@ describe("handleMessages — streaming", () => {
 
     const res = await handleMessages(
       makeRequest({
-        model: "opencode/deepseek-v4-flash-free",
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
         max_tokens: 100,
         stream: true,
         messages: [{ role: "user", content: "hi" }],
@@ -231,6 +224,164 @@ describe("handleMessages — streaming", () => {
     const out = await collectStream(res);
     expect(out).toContain("event: error");
     expect(out).toContain("stream boom");
+  });
+});
+
+describe("stream idle deadline", () => {
+  test("a stalled upstream stream is aborted and releases its slot", async () => {
+    // Regression: the header-level timeout is cleared once fetch resolves, so
+    // nothing used to bound the body. A stalled stream pinned its concurrency
+    // slot forever and wedged the proxy after MAX_CONCURRENT_REQUESTS stalls.
+    const cfg: Config = {
+      ...baseConfig,
+      upstreamTimeoutMs: 150,
+      maxConcurrentRequests: 1,
+      maxQueuedRequests: 0,
+      fallbackModels: [],
+    };
+
+    let resolveStall: (() => void) | undefined;
+    globalThis.fetch = mock(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+          );
+          // Never close, never send more: the upstream just stops talking.
+          void new Promise<void>((resolve) => {
+            resolveStall = resolve;
+          });
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    const stalled = await handleMessages(
+      makeRequest({
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      cfg,
+    );
+    expect(stalled.status).toBe(200);
+
+    const reader = stalled.body!.getReader();
+    const decoder = new TextDecoder();
+    let out = "";
+    // Drain until the deadline fires and the stream terminates.
+    const drained = (async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        out += decoder.decode(value);
+      }
+    })();
+    await Promise.race([drained, Bun.sleep(3000)]);
+    await reader.cancel().catch(() => {});
+    resolveStall?.();
+
+    expect(out).toContain("event: error");
+    expect(out).toContain("stalled");
+
+    // The slot must be back: a fresh request now succeeds instead of 429.
+    globalThis.fetch = mock(async () =>
+      jsonResponse({
+        id: "chatcmpl-after",
+        choices: [
+          { message: { role: "assistant", content: "recovered" }, finish_reason: "stop" },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }),
+    ) as unknown as typeof fetch;
+
+    const after = await handleMessages(
+      makeRequest({
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "hi again" }],
+      }),
+      cfg,
+    );
+    expect(after.status).toBe(200);
+  });
+});
+
+describe("count_tokens does not consume upstream capacity", () => {
+  test("succeeds while every upstream slot is busy", async () => {
+    // Regression: count_tokens shares the upstream RequestLimiter, so a busy
+    // proxy answered Claude Code's own context accounting with 429.
+    const cfg: Config = {
+      ...baseConfig,
+      maxConcurrentRequests: 1,
+      maxQueuedRequests: 0,
+      fallbackModels: [],
+    };
+
+    let resolveStall: (() => void) | undefined;
+    globalThis.fetch = mock(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new TextEncoder().encode('data: {"choices":[{"delta":{"content":"x"}}]}\n\n'),
+          );
+          void new Promise<void>((resolve) => {
+            resolveStall = resolve;
+          });
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+
+    // Occupy the single slot with a stream that will not finish.
+    const inflight = await handleMessages(
+      makeRequest({
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+      cfg,
+    );
+    expect(inflight.status).toBe(200);
+
+    const counted = await handleCountTokens(
+      makeRequest({
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        messages: [{ role: "user", content: "hello world" }],
+      }),
+      cfg,
+    );
+
+    expect(counted.status).toBe(200);
+    const json = (await counted.json()) as { input_tokens: number };
+    expect(json.input_tokens).toBeGreaterThan(0);
+
+    await inflight.body?.cancel().catch(() => {});
+    resolveStall?.();
+  });
+
+  test("still rejects an oversized body and invalid JSON", async () => {
+    const tooBig = await handleCountTokens(
+      makeRequest({ messages: [] }),
+      { ...baseConfig, maxBodyBytes: 4 },
+    );
+    expect(tooBig.status).toBe(413);
+
+    const bad = new Request("http://127.0.0.1:4181/v1/messages/count_tokens", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    const badRes = await handleCountTokens(bad, baseConfig);
+    expect(badRes.status).toBe(400);
   });
 });
 

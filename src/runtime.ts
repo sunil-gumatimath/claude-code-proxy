@@ -171,11 +171,20 @@ export class ModelCooldowns {
 	}
 
 	fail(model: string) {
+		// Re-insert so Map order stays ordered by failure time, not first-seen
+		// time, before evicting the entry that expires soonest.
+		this.until.delete(model);
 		this.until.set(model, Date.now() + this.cooldownMs);
-		// Guard against unbounded growth: evict oldest entry when over capacity.
 		if (this.until.size > ModelCooldowns.MAX_ENTRIES) {
-			const oldest = this.until.keys().next();
-			if (!oldest.done) this.until.delete(oldest.value);
+			let soonestKey: string | undefined;
+			let soonestExpiry = Number.POSITIVE_INFINITY;
+			for (const [key, expiry] of this.until) {
+				if (expiry < soonestExpiry) {
+					soonestExpiry = expiry;
+					soonestKey = key;
+				}
+			}
+			if (soonestKey !== undefined) this.until.delete(soonestKey);
 		}
 	}
 	succeed(model: string) {

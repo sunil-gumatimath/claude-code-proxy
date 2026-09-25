@@ -11,7 +11,7 @@ import {
 	mapUpstreamErrorType,
 	truncate,
 } from "../errors";
-import { colors, debug, error, log } from "../log";
+import { colors, debug, error, log, redact } from "../log";
 import {
 	beginRequest,
 	getRuntime,
@@ -215,6 +215,8 @@ export async function handleMessages(
 				if (
 					response.status === 429 ||
 					response.status === 404 ||
+					response.status === 403 ||
+					response.status === 402 ||
 					response.status >= 500
 				)
 					runtime.cooldowns.fail(displayTarget(target));
@@ -226,7 +228,9 @@ export async function handleMessages(
 					continue;
 				}
 				req.signal.removeEventListener("abort", abortUpstream);
-				error(`Upstream ${response.status}: ${errText.slice(0, 200)}`);
+				error(
+					`Upstream ${response.status}: ${redact(errText).slice(0, 200)}`,
+				);
 				return anthropicError(
 					response.status >= 400 && response.status < 600 ? response.status : 502,
 					mapUpstreamErrorType(response.status),
@@ -239,11 +243,9 @@ export async function handleMessages(
 				if (isAbort && req.signal.aborted) {
 					req.signal.removeEventListener("abort", abortUpstream);
 					return anthropicError(
-						504,
+						499,
 						"api_error",
-						req.signal.aborted
-							? "Client disconnected."
-							: `Upstream timeout after ${config.upstreamTimeoutMs}ms`,
+						"Client disconnected.",
 					);
 				}
 				if (isAbort) {
@@ -301,6 +303,7 @@ export async function handleMessages(
 					streamFinish?.();
 				},
 				config.maxBodyBytes,
+				config.upstreamTimeoutMs,
 			);
 		}
 		try {
@@ -330,6 +333,10 @@ export async function handleMessages(
  * accounting. OpenAI-compatible upstreams have no equivalent endpoint, so we
  * return a deterministic character-based estimate (Anthropic's own heuristic
  * is roughly chars/4). The proxy treats it as an estimate only.
+ *
+ * Deliberately does NOT take a slot from the upstream RequestLimiter: it
+ * performs no upstream work, and Claude Code calls it constantly. Sharing the
+ * limiter meant a busy proxy answered its own context accounting with 429.
  */
 export async function handleCountTokens(
 	req: Request,
@@ -338,52 +345,32 @@ export async function handleCountTokens(
 	if (!isAuthorized(req, config.proxyApiKey)) {
 		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
-	const runtime = getRuntime(config);
 	if (req.signal.aborted) {
 		return anthropicError(499, "api_error", "Client disconnected.");
 	}
-	const releaseSlot = await runtime.limiter.acquire(req.signal);
-	if (!releaseSlot) {
-		if (req.signal.aborted) {
-			return anthropicError(499, "api_error", "Client disconnected.");
-		}
-		return anthropicError(
-			429,
-			"rate_limit_error",
-			"Proxy is busy; try again shortly.",
-		);
-	}
+	let bodyText: string;
 	try {
-		let bodyText: string;
-		try {
-			bodyText = await readBodyLimited(req, config.maxBodyBytes);
-		} catch (err) {
-			if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
-				return anthropicError(
-					413,
-					"invalid_request_error",
-					`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
-				);
-			}
-			throw err;
-		}
-		try {
-			JSON.parse(bodyText);
-		} catch {
+		bodyText = await readBodyLimited(req, config.maxBodyBytes);
+	} catch (err) {
+		if (err instanceof Error && err.message === "BODY_TOO_LARGE") {
 			return anthropicError(
-				400,
+				413,
 				"invalid_request_error",
-				"Request body must be valid JSON.",
+				`Request body exceeds MAX_BODY_BYTES (${config.maxBodyBytes}).`,
 			);
 		}
-		const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
-		return Response.json(
-			{ input_tokens: inputTokens },
-			{ headers: { "Cache-Control": "no-store" } },
-		);
-	} finally {
-		releaseSlot();
+		throw err;
 	}
+	try {
+		JSON.parse(bodyText);
+	} catch {
+		return anthropicError(400, "invalid_request_error", "Request body must be valid JSON.");
+	}
+	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
+	return Response.json(
+		{ input_tokens: inputTokens },
+		{ headers: { "Cache-Control": "no-store" } },
+	);
 }
 
 async function handleSync(
@@ -402,7 +389,7 @@ async function handleSync(
 	const upstreamErr = openaiResult.error;
 	if (upstreamErr) {
 		const errMsg = extractErrorMessage(upstreamErr, "Upstream returned an error");
-		error(`Upstream error: ${errMsg.slice(0, 200)}`);
+		error(`Upstream error: ${redact(errMsg).slice(0, 200)}`);
 		return anthropicError(
 			502,
 			"api_error",
@@ -437,6 +424,7 @@ function handleStream(
 	upstreamController: AbortController,
 	cleanup: () => void,
 	maxBodyBytes = 20 * 1024 * 1024,
+	idleTimeoutMs = 120_000,
 ): Response {
 	const translator = new StreamTranslator(model);
 	const encoder = new TextEncoder();
@@ -463,7 +451,8 @@ function handleStream(
 		if (canceled) return;
 		try {
 			controller.enqueue(data);
-		} catch (e) {
+		} catch {
+			// Consumer went away between the cancel check and the enqueue.
 			canceled = true;
 		}
 	};
@@ -473,8 +462,8 @@ function handleStream(
 		canceled = true;
 		try {
 			controller.close();
-		} catch (e) {
-			// ignore
+		} catch {
+			// Already closed by the runtime — nothing left to do.
 		}
 	};
 
@@ -492,11 +481,37 @@ function handleStream(
 
 			const decoder = new TextDecoder();
 			let buffer = "";
+			let idleTimer: ReturnType<typeof setTimeout> | undefined;
+			let idleTimedOut = false;
+
+			const clearIdleTimer = () => {
+				if (idleTimer === undefined) return;
+				clearTimeout(idleTimer);
+				idleTimer = undefined;
+			};
+			const stallMessage = () =>
+				`Upstream stream stalled for more than ${idleTimeoutMs}ms`;
+			// The header-level timeout is already cleared by the time we get
+			// here, so nothing bounds the body: an upstream that sends headers
+			// and then stalls would hold its concurrency slot for good. Re-arm a
+			// per-read deadline that resets on every chunk of progress.
+			const armIdleTimer = () => {
+				clearIdleTimer();
+				idleTimer = setTimeout(() => {
+					idleTimedOut = true;
+					// Both paths matter: cancel() releases the socket, abort()
+					// unwinds a body that cancel() alone would not disturb.
+					void reader?.cancel("upstream stream idle timeout").catch(() => {});
+					upstreamController.abort("Upstream stream idle timeout");
+				}, idleTimeoutMs);
+			};
 
 			try {
+				armIdleTimer();
 				while (!canceled) {
 					const { done, value } = await reader.read();
 					if (done || canceled) break;
+					armIdleTimer();
 
 					buffer += decoder.decode(value, { stream: true });
 					if (buffer.length > maxBodyBytes) {
@@ -521,20 +536,34 @@ function handleStream(
 					}
 				}
 
-				if (!canceled && buffer.trim().startsWith("data:")) {
-					const trimmed = buffer.trim();
-					const data = trimmed.startsWith("data: ")
-						? trimmed.slice(6)
-						: trimmed.slice(5).trimStart();
-					for (const ev of translator.processChunk(data)) {
-						safeEnqueue(controller, encoder.encode(ev));
-					}
-				}
+				clearIdleTimer();
 
-				// Always close Anthropic stream cleanly
-				if (!canceled) {
-					for (const ev of translator.finalize("stop")) {
-						safeEnqueue(controller, encoder.encode(ev));
+				if (idleTimedOut) {
+					// The stream will not complete on its own. Tell the client
+					// instead of closing it as a normal end_turn, which would
+					// look like a successfully finished (but empty) response.
+					const msg = stallMessage();
+					error(`${msg} ${dim(requestId)}`);
+					safeEnqueue(
+						controller,
+						encoder.encode(anthropicErrorSse("api_error", msg)),
+					);
+				} else {
+					if (!canceled && buffer.trim().startsWith("data:")) {
+						const trimmed = buffer.trim();
+						const data = trimmed.startsWith("data: ")
+							? trimmed.slice(6)
+							: trimmed.slice(5).trimStart();
+						for (const ev of translator.processChunk(data)) {
+							safeEnqueue(controller, encoder.encode(ev));
+						}
+					}
+
+					// Always close Anthropic stream cleanly
+					if (!canceled) {
+						for (const ev of translator.finalize("stop")) {
+							safeEnqueue(controller, encoder.encode(ev));
+						}
 					}
 				}
 
@@ -545,7 +574,13 @@ function handleStream(
 				safeClose(controller);
 			} catch (err) {
 				if (canceled) return;
-				const msg = err instanceof Error ? err.message : String(err);
+				// The idle timer aborts the body, so the stall usually surfaces
+				// here rather than as a clean read() end. Report the stall, not
+				// the resulting abort error.
+				let msg = stallMessage();
+				if (!idleTimedOut) {
+					msg = err instanceof Error ? err.message : String(err);
+				}
 				if (!msg.includes("Controller is already closed")) {
 					error(`Stream error: ${msg}`);
 				}
@@ -555,6 +590,7 @@ function handleStream(
 				);
 				safeClose(controller);
 			} finally {
+				clearIdleTimer();
 				onceCleanup();
 			}
 		},
@@ -593,9 +629,13 @@ export function canFallback(
 ): boolean {
 	return (
 		attempt < totalAttempts - 1 &&
-		// 404 = model retired/renamed (common as free pools rotate); try the
-		// next candidate instead of failing the whole request.
-		(status === 404 || status === 408 || status === 429 || status >= 500)
+		// 404 = model retired/renamed, 403/402 = quota exhausted or free tier blocked, 429 = rate limit, 500+ = server error
+		(status === 404 ||
+			status === 408 ||
+			status === 429 ||
+			status === 403 ||
+			status === 402 ||
+			status >= 500)
 	);
 }
 
@@ -605,8 +645,9 @@ export function resolveTarget(
 	config: Config,
 ): UpstreamTarget {
 	const explicit = parseTarget(requestedModel);
+	// Smart routing only rewrites bare `claude-*` names through the alias table.
+	// A provider-qualified id is already an explicit choice and is left alone.
 	if (
-		explicit.provider === "opencode" ||
 		!config.smartRouting ||
 		!requestedModel.toLowerCase().startsWith("claude-")
 	) {
@@ -618,7 +659,7 @@ export function resolveTarget(
 			Array.isArray(message.content) &&
 			message.content.some((block) => block.type === "image"),
 	);
-	if (hasImage) return parseTarget("kilo/stepfun/step-3.7-flash:free");
+	if (hasImage) return parseTarget(config.visionModel);
 	const alias = config.modelAliases.find(({ pattern }) =>
 		globMatches(pattern, requested),
 	);

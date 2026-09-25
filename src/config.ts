@@ -3,6 +3,20 @@
 // ============================================================================
 
 import type { ReasoningEffort } from "./types";
+// Value import: providers.ts only imports the `Config` *type* from this module,
+// so there is no runtime cycle back into config.ts.
+import { canonicalizeModelId } from "./providers";
+
+/**
+ * Read a positive integer. `min` allows 0 where the setting is a meaningful
+ * value of its own (queue depth, cooldown) rather than a required magnitude.
+ */
+function envInt(key: string, fallback: number, min = 1): number {
+  const raw = Bun.env[key];
+  if (raw == null || raw === "") return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= min ? Math.floor(n) : fallback;
+}
 
 function envBool(key: string, fallback = false): boolean {
   const v = Bun.env[key];
@@ -10,16 +24,17 @@ function envBool(key: string, fallback = false): boolean {
   return v === "1" || v.toLowerCase() === "true" || v.toLowerCase() === "yes";
 }
 
-function envInt(key: string, fallback: number): number {
-  const raw = Bun.env[key];
-  if (raw == null || raw === "") return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
-}
-
 function envStr(key: string, fallback: string): string {
   const v = Bun.env[key];
   return v == null || v === "" ? fallback : v;
+}
+
+function envList(key: string, fallback: string): string[] {
+  return (Bun.env[key] ?? fallback)
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map(canonicalizeModelId);
 }
 
 export interface Config {
@@ -27,8 +42,9 @@ export interface Config {
   host: string;
   port: number;
   kiloApiKey: string;
-  opencodeApiKey: string;
-  opencodeBaseUrl: string;
+  /** QwenCloud / DashScope (Alibaba) — OpenAI-compatible via compatible-mode/v1 */
+  qwenApiKey: string;
+  qwenBaseUrl: string;
   /** Optional shared secret required from clients before requests are forwarded. */
   proxyApiKey: string;
   kiloBaseUrl: string;
@@ -39,6 +55,8 @@ export interface Config {
   allowedModels: string[];
   /** Reject paid and unapproved models instead of forwarding them upstream. */
   freeModelsOnly: boolean;
+  /** Vision-capable model used for image requests when smart routing applies. */
+  visionModel: string;
   modelAliases: Array<{ pattern: string; model: string }>;
   /** Forced upstream reasoning effort; "" derives it from the thinking budget. */
   reasoningEffort: ReasoningEffort;
@@ -47,7 +65,7 @@ export interface Config {
   maxQueuedRequests: number;
   modelCooldownMs: number;
   debug: boolean;
-  /** Upstream fetch timeout (ms) */
+  /** Upstream fetch timeout (ms), also used as the per-read SSE stream deadline. */
   upstreamTimeoutMs: number;
   /** Verify the TLS certificate supplied by the upstream (keep enabled normally). */
   upstreamTlsRejectUnauthorized: boolean;
@@ -58,15 +76,51 @@ export interface Config {
   corsAllowedOrigins: string[];
 }
 
+const DEFAULT_FALLBACK_MODELS = [
+  "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+  "kilo/cohere/north-mini-code:free",
+  "kilo/stepfun/step-3.7-flash:free",
+  "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "kilo/kilo-auto/free",
+].join(",");
+
+/**
+ * Default approval list. A non-empty ALLOWED_MODELS is an explicit opt-in, so
+ * defaulting to "all free models" would hand the client the whole Kilo catalog
+ * and stop FREE_MODELS_ONLY from meaning anything.
+ */
+const DEFAULT_ALLOWED_MODELS = [
+  "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+  "kilo/nvidia/nemotron-3.5-lightning:free",
+  "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+  "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+  "kilo/thinkingmachines/inkling-small:free",
+  "kilo/stealth/space-bunny-alpha",
+  "kilo/stepfun/step-3.7-flash:free",
+  "kilo/qwen/qwen3.8-27b:free",
+  "kilo/dots-studio/dots-3-note-preview:free",
+  "kilo/poolside/laguna-s-2.1:free",
+  "kilo/poolside/laguna-xs-2.1:free",
+  "kilo/cohere/north-mini-code:free",
+  "kilo/inclusionai/ling-3.0-flash-sante:free",
+  "kilo/inclusionai/ling-3.0-flash-fin:free",
+  "kilo/liquid/lfm-2.5-2.6b:free",
+  "kilo/openrouter/free",
+  "kilo/kilo-auto/free",
+].join(",");
+
 export function loadConfig(): Config {
   return {
     host: envStr("PROXY_HOST", "127.0.0.1"),
     port: envInt("PROXY_PORT", 4181),
     kiloApiKey: envStr("KILO_API_KEY", ""),
-    opencodeApiKey: envStr("OPENCODE_API_KEY", ""),
-    opencodeBaseUrl: envStr(
-      "OPENCODE_BASE_URL",
-      "https://opencode.ai/zen/v1",
+    qwenApiKey: envStr("QWEN_API_KEY", envStr("DASHSCOPE_API_KEY", "")),
+    qwenBaseUrl: envStr(
+      "QWEN_BASE_URL",
+      envStr(
+        "DASHSCOPE_BASE_URL",
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      ),
     ).replace(/\/+$/, ""),
     proxyApiKey: envStr("PROXY_API_KEY", ""),
     kiloBaseUrl: envStr(
@@ -75,31 +129,26 @@ export function loadConfig(): Config {
     ).replace(/\/+$/, ""),
     // Preserve Claude Code's requested model name unless the gateway requires a prefix.
     modelPrefix: Bun.env.MODEL_PREFIX ?? "",
-    defaultModel: envStr("DEFAULT_MODEL", "kilo/tencent/hy3:free"),
-    fallbackModels: (
-      Bun.env.FALLBACK_MODELS ??
-      "kilo/poolside/laguna-s-2.1:free,opencode/hy3-free,opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,kilo/stepfun/step-3.7-flash:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/cohere/north-mini-code:free"
-    )
-      .split(",")
-      .map((model) => model.trim())
-      .filter(Boolean),
-    allowedModels: (
-      Bun.env.ALLOWED_MODELS ??
-      "kilo/stealth/ox-alpha,kilo/stealth/ox-alpha:free,opencode/deepseek-v4-flash-free,opencode/laguna-s-2.1-free,opencode/nemotron-3-ultra-free,opencode/nemotron-3.5-lightning-free,opencode/mimo-v2.5-free,opencode/hy3-free,kilo/kilo-auto/free,kilo/stepfun/step-3.7-flash:free,kilo/poolside/laguna-s-2.1:free,kilo/poolside/laguna-xs-2.1:free,kilo/cohere/north-mini-code:free,kilo/nvidia/nemotron-3-ultra-550b-a55b:free,kilo/nvidia/nemotron-3-super-120b-a12b:free,kilo/nvidia/nemotron-3.5-lightning:free,kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free,kilo/tencent/hy3:free,kilo/dots-studio/dots-3-note-preview:free,kilo/liquid/lfm-2.5-2.6b:free,kilo/openrouter/free"
-    )
-      .split(",")
-      .map((model) => model.trim())
-      .filter(Boolean),
+    defaultModel: canonicalizeModelId(
+      envStr("DEFAULT_MODEL", "kilo/stealth/space-bunny-alpha"),
+    ),
+    fallbackModels: envList("FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS),
+    allowedModels: envList("ALLOWED_MODELS", DEFAULT_ALLOWED_MODELS),
     freeModelsOnly: envBool("FREE_MODELS_ONLY", true),
+    visionModel: canonicalizeModelId(
+      envStr("VISION_MODEL", "kilo/stealth/space-bunny-alpha"),
+    ),
     modelAliases: parseAliases(
       Bun.env.MODEL_ALIASES ??
-        "*haiku*=kilo/tencent/hy3:free,*sonnet*=kilo/tencent/hy3:free,*opus*=kilo/tencent/hy3:free",
+        "*haiku*=kilo/stealth/space-bunny-alpha,*sonnet*=kilo/stealth/space-bunny-alpha,*opus*=kilo/stealth/space-bunny-alpha",
     ),
     reasoningEffort: parseReasoningEffort(Bun.env.REASONING_EFFORT ?? ""),
     smartRouting: envBool("SMART_ROUTING", true),
     maxConcurrentRequests: envInt("MAX_CONCURRENT_REQUESTS", 4),
-    maxQueuedRequests: envInt("MAX_QUEUED_REQUESTS", 20),
-    modelCooldownMs: envInt("MODEL_COOLDOWN_MS", 30_000),
+    // 0 is meaningful here: it disables queueing so a saturated proxy fails
+    // fast with 429 instead of holding requests open.
+    maxQueuedRequests: envInt("MAX_QUEUED_REQUESTS", 20, 0),
+    modelCooldownMs: envInt("MODEL_COOLDOWN_MS", 30_000, 0),
     debug: envBool("DEBUG", false),
     upstreamTimeoutMs: envInt("UPSTREAM_TIMEOUT_MS", 120_000),
     upstreamTlsRejectUnauthorized: envBool(
@@ -107,7 +156,7 @@ export function loadConfig(): Config {
       true,
     ),
     upstreamCaFile: envStr("UPSTREAM_CA_FILE", ""),
-    maxBodyBytes: envInt("MAX_BODY_BYTES", 20 * 1024 * 1024), // 20 MB
+    maxBodyBytes: envInt("MAX_BODY_BYTES", 20 * 1024 * 1024),
     corsAllowedOrigins: (Bun.env.CORS_ALLOWED_ORIGINS ?? "")
       .split(",")
       .map((origin) => origin.trim())
@@ -132,7 +181,9 @@ function parseReasoningEffort(raw: string): ReasoningEffort {
 function parseAliases(raw: string): Array<{ pattern: string; model: string }> {
   return raw.split(",").flatMap((entry) => {
     const [pattern, model] = entry.split("=").map((part) => part.trim());
-    return pattern && model ? [{ pattern: pattern.toLowerCase(), model }] : [];
+    return pattern && model
+      ? [{ pattern: pattern.toLowerCase(), model: canonicalizeModelId(model) }]
+      : [];
   });
 }
 
