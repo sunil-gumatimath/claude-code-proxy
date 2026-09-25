@@ -1,0 +1,18 @@
+# Normalise line endings in the repository to LF, and check them out as LF too.
+# Without this, the same commit produces CRLF on Windows and LF elsewhere, which
+# makes formatting-only diffs enormous and unreviewable.
+* text=auto eol=lf
+
+# Native scripts must keep CRLF to run on Windows.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary-ish assets are never line-ending converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
