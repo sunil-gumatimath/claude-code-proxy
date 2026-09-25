@@ -13,6 +13,16 @@ export const colors = { dim, cyan, green, red, yellow, bold };
 
 let debugEnabled = false;
 
+/** JSON-shaped projection of an arbitrary logged value, after redaction. */
+export type SanitizedValue =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | SanitizedValue[]
+  | { [key: string]: SanitizedValue };
+
 export function setDebug(enabled: boolean) {
   debugEnabled = enabled;
 }
@@ -22,7 +32,7 @@ function ts(): string {
 }
 
 /** Redact long base64 / potential secrets and summarize prompt bodies in debug dumps */
-function sanitizeForLog(value: unknown, depth = 0): unknown {
+function sanitizeForLog(value: unknown, depth = 0): SanitizedValue {
   if (depth > 8) return "[…]";
   if (value == null) return value;
   if (typeof value === "string") {
@@ -36,7 +46,7 @@ function sanitizeForLog(value: unknown, depth = 0): unknown {
     return value.slice(0, 50).map((v) => sanitizeForLog(v, depth + 1));
   }
   if (typeof value === "object") {
-    const out: Record<string, unknown> = {};
+    const out: Record<string, SanitizedValue> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       if (/key|token|secret|authorization|password|credential|cookie/i.test(k)) {
         out[k] = "[REDACTED]";
@@ -50,7 +60,9 @@ function sanitizeForLog(value: unknown, depth = 0): unknown {
     }
     return out;
   }
-  return value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  // Symbols, bigints, and functions have no useful JSON form in a log dump.
+  return String(value);
 }
 
 export function log(msg: string) {
@@ -75,6 +87,21 @@ export function debug(msg: string, data?: unknown) {
   if (data !== undefined) {
     console.log(JSON.stringify(sanitizeForLog(data), null, 2));
   }
+}
+
+/**
+ * Strip credential-shaped substrings from free-form text (upstream error
+ * bodies, echoed payloads). sanitizeForLog only covers structured debug dumps,
+ * so anything logged as a plain string must pass through here first.
+ */
+export function redact(text: string): string {
+  return text
+    .replace(/\b(?:sk|pk|rk)-[A-Za-z0-9_-]{8,}/g, "[REDACTED]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(
+      /("?(?:api[_-]?key|authorization|access[_-]?token|secret|password)"?\s*[:=]\s*)("?)[^\s",}]+\2/gi,
+      "$1$2[REDACTED]$2",
+    );
 }
 
 export function banner(lines: string[]) {
