@@ -7,20 +7,28 @@ on:
     branches: [main, master]
 
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned to a minor so a Bun release cannot break the build without a
+      # commit. The lockfile is frozen; the runtime should be just as stable.
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: "1.3.0"
 
       - name: Install
         run: bun install --frozen-lockfile
 
-      - name: Test
-        run: bun test
+      - name: Format
+        run: bun run format:check
+
+      - name: Lint
+        run: bun run lint
 
       - name: Typecheck
         run: bun run typecheck
+
+      - name: Test
+        run: bun test
