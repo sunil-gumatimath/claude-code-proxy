@@ -10,11 +10,7 @@ import {
 } from "../src/handlers/messages";
 import type { AnthropicMessagesRequest } from "../src/types";
 import { qualifyModel, getCapabilities, isFreeTarget } from "../src/providers";
-import {
-	RequestLimiter,
-	prometheusMetrics,
-	recordModelRequest,
-} from "../src/runtime";
+import { RequestLimiter, prometheusMetrics, recordModelRequest } from "../src/runtime";
 
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -194,32 +190,23 @@ describe("isTargetAllowed", () => {
 			),
 		).toBe(true);
 		expect(
-			isTargetAllowed(
-				{ provider: "kilo", model: "poolside/laguna-s-2.1:free" },
-				cfg,
-			),
+			isTargetAllowed({ provider: "kilo", model: "poolside/laguna-s-2.1:free" }, cfg),
 		).toBe(true);
 		expect(
-			isTargetAllowed(
-				{ provider: "kilo", model: "stealth/space-bunny-alpha" },
-				cfg,
-			),
+			isTargetAllowed({ provider: "kilo", model: "stealth/space-bunny-alpha" }, cfg),
 		).toBe(true);
 	});
 
 	test("paid model with freeModelsOnly → false", () => {
-		expect(
-			isTargetAllowed({ provider: "kilo", model: "some-paid-model" }, cfg),
-		).toBe(false);
+		expect(isTargetAllowed({ provider: "kilo", model: "some-paid-model" }, cfg)).toBe(
+			false,
+		);
 	});
 
 	test("freeModelsOnly=false permits any free model even if not in list", () => {
 		const cfgLax = request({ freeModelsOnly: false, allowedModels: [] });
 		expect(
-			isTargetAllowed(
-				{ provider: "kilo", model: "some-unknown-free" },
-				cfgLax,
-			),
+			isTargetAllowed({ provider: "kilo", model: "some-unknown-free" }, cfgLax),
 		).toBe(true);
 	});
 
@@ -239,9 +226,7 @@ describe("isTargetAllowed", () => {
 		const cfgPaid = request({
 			allowedModels: ["qwen/qwen3-max"],
 		});
-		expect(
-			isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgPaid),
-		).toBe(true);
+		expect(isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgPaid)).toBe(true);
 	});
 
 	test("paid model not allowlisted rejected under freeModelsOnly", () => {
@@ -253,10 +238,7 @@ describe("isTargetAllowed", () => {
 	test("empty allowedModels permits all free models", () => {
 		const cfgPermissive = request({ allowedModels: [] });
 		expect(
-			isTargetAllowed(
-				{ provider: "kilo", model: "openrouter/free" },
-				cfgPermissive,
-			),
+			isTargetAllowed({ provider: "kilo", model: "openrouter/free" }, cfgPermissive),
 		).toBe(true);
 	});
 
@@ -264,14 +246,20 @@ describe("isTargetAllowed", () => {
 	// model tier, so it must never slip through the free-only gate.
 	test("qwen model is rejected by freeModelsOnly even with no allowlist", () => {
 		const cfgOpen = request({ allowedModels: [] });
-		expect(isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgOpen)).toBe(false);
-		expect(isTargetAllowed({ provider: "qwen", model: "qwen3.8-max" }, cfgOpen)).toBe(false);
+		expect(isTargetAllowed({ provider: "qwen", model: "qwen3-max" }, cfgOpen)).toBe(
+			false,
+		);
+		expect(isTargetAllowed({ provider: "qwen", model: "qwen3.8-max" }, cfgOpen)).toBe(
+			false,
+		);
 		expect(isFreeTarget({ provider: "qwen", model: "qwen3-max" })).toBe(false);
 	});
 
 	test("unknown qwen model fails closed under freeModelsOnly", () => {
 		const cfgOpen = request({ allowedModels: [] });
-		expect(isTargetAllowed({ provider: "qwen", model: "brand-new-model" }, cfgOpen)).toBe(false);
+		expect(isTargetAllowed({ provider: "qwen", model: "brand-new-model" }, cfgOpen)).toBe(
+			false,
+		);
 	});
 });
 
@@ -301,7 +289,10 @@ describe("resolveTarget", () => {
 				{
 					role: "user",
 					content: [
-						{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+						{
+							type: "image",
+							source: { type: "base64", media_type: "image/png", data: "abc" },
+						},
 						{ type: "text", text: "what is this?" },
 					],
 				},
@@ -318,7 +309,10 @@ describe("resolveTarget", () => {
 				{
 					role: "user",
 					content: [
-						{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+						{
+							type: "image",
+							source: { type: "base64", media_type: "image/png", data: "abc" },
+						},
 					],
 				},
 			],
@@ -333,7 +327,11 @@ describe("resolveTarget", () => {
 	});
 
 	test("claude model with alias match → aliased target", () => {
-		const target = resolveTarget("claude-sonnet-4-20250514", { messages: [{ role: "user", content: "hi" }] }, request());
+		const target = resolveTarget(
+			"claude-sonnet-4-20250514",
+			{ messages: [{ role: "user", content: "hi" }] },
+			request(),
+		);
 		expect(target.provider).toBe("kilo");
 		expect(target.model).toBe("nvidia/nemotron-3-ultra-550b-a55b:free");
 	});
@@ -351,13 +349,21 @@ describe("resolveTarget", () => {
 
 	test("smartRouting disabled returns explicit target", () => {
 		const cfgNoRouting = request({ smartRouting: false });
-		const target = resolveTarget("claude-sonnet-4", { messages: [{ role: "user", content: "hi" }] }, cfgNoRouting);
+		const target = resolveTarget(
+			"claude-sonnet-4",
+			{ messages: [{ role: "user", content: "hi" }] },
+			cfgNoRouting,
+		);
 		expect(target.provider).toBe("kilo");
 		expect(target.model).toBe("claude-sonnet-4");
 	});
 
 	test("non-claude model skips smart routing", () => {
-		const target = resolveTarget("gpt-4", { messages: [{ role: "user", content: "hi" }] }, request());
+		const target = resolveTarget(
+			"gpt-4",
+			{ messages: [{ role: "user", content: "hi" }] },
+			request(),
+		);
 		expect(target.provider).toBe("kilo");
 		expect(target.model).toBe("gpt-4");
 	});
@@ -474,7 +480,10 @@ describe("buildCandidateTargets", () => {
 					{
 						role: "user",
 						content: [
-							{ type: "image", source: { type: "base64", media_type: "image/png", data: "abc" } },
+							{
+								type: "image",
+								source: { type: "base64", media_type: "image/png", data: "abc" },
+							},
 						],
 					},
 				],
@@ -512,37 +521,28 @@ describe("buildCandidateTargets", () => {
 describe("qualifyModel", () => {
 	test("kilo target with MODEL_PREFIX gets prefixed", () => {
 		const cfg = request({ modelPrefix: "anthropic/" });
-		expect(
-			qualifyModel({ provider: "kilo", model: "claude-sonnet-4" }, cfg),
-		).toBe("anthropic/claude-sonnet-4");
+		expect(qualifyModel({ provider: "kilo", model: "claude-sonnet-4" }, cfg)).toBe(
+			"anthropic/claude-sonnet-4",
+		);
 	});
 
 	test("kilo target already prefixed is not double-prefixed", () => {
 		const cfg = request({ modelPrefix: "anthropic/" });
 		expect(
-			qualifyModel(
-				{ provider: "kilo", model: "anthropic/claude-sonnet-4" },
-				cfg,
-			),
+			qualifyModel({ provider: "kilo", model: "anthropic/claude-sonnet-4" }, cfg),
 		).toBe("anthropic/claude-sonnet-4");
 	});
 
 	test("qwen target ignores MODEL_PREFIX", () => {
 		const cfg = request({ modelPrefix: "anthropic/" });
-		expect(
-			qualifyModel(
-				{ provider: "qwen", model: "qwen3.7-max" },
-				cfg,
-			),
-		).toBe("qwen3.7-max");
+		expect(qualifyModel({ provider: "qwen", model: "qwen3.7-max" }, cfg)).toBe(
+			"qwen3.7-max",
+		);
 	});
 
 	test("no MODEL_PREFIX leaves model untouched", () => {
 		expect(
-			qualifyModel(
-				{ provider: "kilo", model: "stepfun/step-3.7-flash:free" },
-				request(),
-			),
+			qualifyModel({ provider: "kilo", model: "stepfun/step-3.7-flash:free" }, request()),
 		).toBe("stepfun/step-3.7-flash:free");
 	});
 });

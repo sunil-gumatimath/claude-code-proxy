@@ -197,10 +197,7 @@ let _cooldowns: ModelCooldowns | undefined;
 
 export function getRuntime(config: Config) {
 	if (!_limiter) {
-		_limiter = new RequestLimiter(
-			config.maxConcurrentRequests,
-			config.maxQueuedRequests,
-		);
+		_limiter = new RequestLimiter(config.maxConcurrentRequests, config.maxQueuedRequests);
 		_cooldowns = new ModelCooldowns(config.modelCooldownMs);
 	}
 	return { limiter: _limiter, cooldowns: _cooldowns as ModelCooldowns };

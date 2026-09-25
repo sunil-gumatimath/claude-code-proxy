@@ -1,9 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-	StreamTranslator,
-	translateRequest,
-	translateResponse,
-} from "../src/translate";
+import { StreamTranslator, translateRequest, translateResponse } from "../src/translate";
 
 describe("translateRequest", () => {
 	test("keeps requested model name and maps messages", () => {
@@ -77,54 +73,48 @@ describe("translateRequest", () => {
 	});
 
 	test("maps tool_result to role:tool messages", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "user",
-						content: [
-							{
-								type: "tool_result",
-								tool_use_id: "call_1",
-								content: "ok",
-							},
-						],
-					},
-				],
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "call_1",
+							content: "ok",
+						},
+					],
+				},
+			],
+		});
 		expect(out.messages).toEqual([
 			{ role: "tool", tool_call_id: "call_1", content: "ok" },
 		]);
 	});
 
 	test("maps assistant tool_use to tool_calls", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "assistant",
-						content: [
-							{ type: "text", text: "Using tool" },
-							{
-								type: "tool_use",
-								id: "toolu_1",
-								name: "search",
-								input: { q: "bun" },
-							},
-						],
-					},
-					{
-						role: "user",
-						content: [
-							{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" },
-						],
-					},
-				],
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Using tool" },
+						{
+							type: "tool_use",
+							id: "toolu_1",
+							name: "search",
+							input: { q: "bun" },
+						},
+					],
+				},
+				{
+					role: "user",
+					content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }],
+				},
+			],
+		});
 		expect(out.messages[0].content).toBe("Using tool");
 		expect(out.messages[0].tool_calls?.[0]).toMatchObject({
 			id: "toolu_1",
@@ -137,38 +127,34 @@ describe("translateRequest", () => {
 		// A tool call the upstream never generated (interrupted stream) must
 		// not be echoed: strict gateways 400 tool_calls with no follow-up tool
 		// message.
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "assistant",
-						content: [
-							{ type: "text", text: "Using tool" },
-							{
-								type: "tool_use",
-								id: "toolu_ghost",
-								name: "search",
-								input: { q: "bun" },
-							},
-						],
-					},
-					{ role: "user", content: "continue anyway" },
-				],
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Using tool" },
+						{
+							type: "tool_use",
+							id: "toolu_ghost",
+							name: "search",
+							input: { q: "bun" },
+						},
+					],
+				},
+				{ role: "user", content: "continue anyway" },
+			],
+		});
 		expect(out.messages[0].tool_calls).toBeUndefined();
 		expect(out.messages[0].content).toBe("Using tool");
 	});
 
 	test("maps system as array of text blocks", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				system: [{ type: "text", text: "Be concise." }],
-				messages: [{ role: "user", content: "hi" }],
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			system: [{ type: "text", text: "Be concise." }],
+			messages: [{ role: "user", content: "hi" }],
+		});
 		expect(out.messages[0]).toEqual({ role: "system", content: "Be concise." });
 	});
 
@@ -212,31 +198,25 @@ describe("translateRequest", () => {
 	});
 
 	test("maps thinking budget to reasoning_effort", () => {
-		const low = translateRequest(
-			{
-				model: "m",
-				messages: [{ role: "user", content: "hi" }],
-				thinking: { type: "enabled", budget_tokens: 2000 },
-			},
-		);
+		const low = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			thinking: { type: "enabled", budget_tokens: 2000 },
+		});
 		expect(low.reasoning_effort).toBe("low");
 
-		const med = translateRequest(
-			{
-				model: "m",
-				messages: [{ role: "user", content: "hi" }],
-				thinking: { type: "enabled", budget_tokens: 6000 },
-			},
-		);
+		const med = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			thinking: { type: "enabled", budget_tokens: 6000 },
+		});
 		expect(med.reasoning_effort).toBe("medium");
 
-		const high = translateRequest(
-			{
-				model: "m",
-				messages: [{ role: "user", content: "hi" }],
-				thinking: { type: "enabled", budget_tokens: 15000 },
-			},
-		);
+		const high = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			thinking: { type: "enabled", budget_tokens: 15000 },
+		});
 		expect(high.reasoning_effort).toBe("high");
 	});
 
@@ -271,74 +251,64 @@ describe("translateRequest", () => {
 	});
 
 	test("maps image content blocks (base64 and URL)", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "user",
-						content: [
-							{ type: "text", text: "What is this?" },
-							{
-								type: "image",
-								source: {
-									type: "base64",
-									media_type: "image/png",
-									data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAA=",
-								},
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "What is this?" },
+						{
+							type: "image",
+							source: {
+								type: "base64",
+								media_type: "image/png",
+								data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAA=",
 							},
-							{
-								type: "image",
-								source: { type: "url", url: "https://example.com/photo.jpg" },
-							},
-						] as any,
-					},
-				],
-			},
-		);
+						},
+						{
+							type: "image",
+							source: { type: "url", url: "https://example.com/photo.jpg" },
+						},
+					] as any,
+				},
+			],
+		});
 		const content = out.messages[0].content as unknown[];
 		expect(content).toHaveLength(3);
 		expect((content[0] as any).type).toBe("text");
 		expect((content[1] as any).type).toBe("image_url");
 		expect((content[2] as any).type).toBe("image_url");
-		expect((content[1] as any).image_url.url).toContain(
-			"data:image/png;base64,",
-		);
-		expect((content[2] as any).image_url.url).toBe(
-			"https://example.com/photo.jpg",
-		);
+		expect((content[1] as any).image_url.url).toContain("data:image/png;base64,");
+		expect((content[2] as any).image_url.url).toBe("https://example.com/photo.jpg");
 	});
 
 	test("maps document blocks", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [
-					{
-						role: "user",
-						content: [
-							{
-								type: "document",
-								source: { type: "text", content: "Hello from doc" },
-							},
-						] as any,
-					},
-				],
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "document",
+							source: { type: "text", content: "Hello from doc" },
+						},
+					] as any,
+				},
+			],
+		});
 		expect(out.messages[0].content as string).toContain("[Document]");
 		expect(out.messages[0].content as string).toContain("Hello from doc");
 	});
 
 	test("forwards stop_sequences and top_p", () => {
-		const out = translateRequest(
-			{
-				model: "m",
-				messages: [{ role: "user", content: "hi" }],
-				stop_sequences: ["\n\n", "."],
-				top_p: 0.9,
-			},
-		);
+		const out = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			stop_sequences: ["\n\n", "."],
+			top_p: 0.9,
+		});
 		expect(out.stop).toEqual(["\n\n", "."]);
 		expect(out.top_p).toBe(0.9);
 	});
@@ -543,9 +513,7 @@ describe("translateResponse", () => {
 						message: {
 							role: "assistant",
 							content: "text",
-							tool_calls: [
-								{ type: "function", function: { name: "", arguments: "{}" } },
-							],
+							tool_calls: [{ type: "function", function: { name: "", arguments: "{}" } }],
 						},
 						finish_reason: "tool_calls",
 					},
@@ -753,9 +721,7 @@ describe("StreamTranslator", () => {
 		const t = new StreamTranslator("m");
 		const events = t.processChunk(
 			JSON.stringify({
-				choices: [
-					{ delta: { reasoning_content: "Let me think..." }, index: 0 },
-				],
+				choices: [{ delta: { reasoning_content: "Let me think..." }, index: 0 }],
 			}),
 		);
 		const joined = events.join("");
@@ -791,9 +757,7 @@ describe("StreamTranslator", () => {
 				choices: [
 					{
 						delta: {
-							tool_calls: [
-								{ index: 0, function: { arguments: '{"cmd":"echo"}' } },
-							],
+							tool_calls: [{ index: 0, function: { arguments: '{"cmd":"echo"}' } }],
 						},
 					},
 				],
@@ -826,9 +790,7 @@ describe("StreamTranslator", () => {
 		);
 		const joined = [...think, ...text, ...finish].join("");
 		// Thinking block is stopped before text block starts
-		expect(joined.match(/content_block_stop/g)?.length).toBeGreaterThanOrEqual(
-			2,
-		);
+		expect(joined.match(/content_block_stop/g)?.length).toBeGreaterThanOrEqual(2);
 		expect(joined).toContain("thinking_delta");
 		expect(joined).toContain("text_delta");
 	});
@@ -916,10 +878,12 @@ describe("StreamTranslator", () => {
 		const t = new StreamTranslator("m");
 		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "a" } }] }));
 		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }] }));
-		const end = t.processChunk(JSON.stringify({
-			choices: [],
-			usage: { prompt_tokens: 8, completion_tokens: 4 },
-		}));
+		const end = t.processChunk(
+			JSON.stringify({
+				choices: [],
+				usage: { prompt_tokens: 8, completion_tokens: 4 },
+			}),
+		);
 		const joined = [...end, ...t.finalize()].join("");
 		expect(joined).toContain('"output_tokens":4');
 	});
@@ -953,7 +917,11 @@ describe("StreamTranslator", () => {
 					{
 						delta: {
 							tool_calls: [
-								{ index: 0, id: "call_1", function: { name: "get_weather", arguments: "" } },
+								{
+									index: 0,
+									id: "call_1",
+									function: { name: "get_weather", arguments: "" },
+								},
 							],
 						},
 						index: 0,
@@ -964,7 +932,12 @@ describe("StreamTranslator", () => {
 		t.processChunk(
 			JSON.stringify({
 				choices: [
-					{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":"Paris"}' } }] }, index: 0 },
+					{
+						delta: {
+							tool_calls: [{ index: 0, function: { arguments: '{"city":"Paris"}' } }],
+						},
+						index: 0,
+					},
 				],
 			}),
 		);
@@ -1009,7 +982,11 @@ describe("StreamTranslator", () => {
 					{
 						delta: {
 							tool_calls: [
-								{ index: 0, id: "call_2", function: { name: "do_thing", arguments: "{}" } },
+								{
+									index: 0,
+									id: "call_2",
+									function: { name: "do_thing", arguments: "{}" },
+								},
 							],
 						},
 						index: 0,
@@ -1026,7 +1003,9 @@ describe("StreamTranslator", () => {
 	test("finalize stays idempotent and a repeated call emits nothing", () => {
 		const t = new StreamTranslator("m");
 		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "hi" }, index: 0 }] }));
-		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }));
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }),
+		);
 		const first = t.finalize().join("");
 		expect(first).toContain('"type":"message_stop"');
 		expect(t.finalize()).toEqual([]);
@@ -1036,8 +1015,12 @@ describe("StreamTranslator", () => {
 
 	test("a length finish_reason survives to message_delta", () => {
 		const t = new StreamTranslator("m");
-		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "partial" }, index: 0 }] }));
-		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "length", index: 0 }] }));
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: { content: "partial" }, index: 0 }] }),
+		);
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: {}, finish_reason: "length", index: 0 }] }),
+		);
 		expect(t.finalize().join("")).toContain('"stop_reason":"max_tokens"');
 	});
 });

@@ -19,12 +19,7 @@ import {
 	recordModelRequest,
 	recordUpstreamError,
 } from "../runtime";
-import {
-	StreamTranslator,
-	translateRequest,
-	translateResponse,
-	uid,
-} from "../translate";
+import { StreamTranslator, translateRequest, translateResponse, uid } from "../translate";
 import type { AnthropicMessagesRequest, OpenAIChatResponse } from "../types";
 import {
 	displayTarget,
@@ -40,10 +35,7 @@ import {
 
 const { cyan, green, bold, dim } = colors;
 
-export async function handleMessages(
-	req: Request,
-	config: Config,
-): Promise<Response> {
+export async function handleMessages(req: Request, config: Config): Promise<Response> {
 	const startTime = performance.now();
 	const requestId = `req_${uid()}`;
 	let releaseSlot: (() => void) | undefined;
@@ -136,11 +128,7 @@ export async function handleMessages(
 			if (req.signal.aborted) {
 				return anthropicError(499, "api_error", "Client disconnected.");
 			}
-			return anthropicError(
-				429,
-				"rate_limit_error",
-				"Proxy is busy; try again shortly.",
-			);
+			return anthropicError(429, "rate_limit_error", "Proxy is busy; try again shortly.");
 		}
 		if (req.signal.aborted) {
 			releaseSlot();
@@ -161,10 +149,7 @@ export async function handleMessages(
 				provider.apiKey ||
 				(target.provider === requestedTarget.provider ? requestApiKey : "");
 			openaiBody.model = qualifyModel(target, config);
-			const targetEffort = normalizeReasoningEffort(
-				target,
-				openaiBody.reasoning_effort,
-			);
+			const targetEffort = normalizeReasoningEffort(target, openaiBody.reasoning_effort);
 			const payload = {
 				...openaiBody,
 				...(targetEffort ? { reasoning_effort: targetEffort } : {}),
@@ -203,9 +188,7 @@ export async function handleMessages(
 					runtime.cooldowns.succeed(displayTarget(target));
 					if (attempt > 0) {
 						recordFallback();
-						log(
-							`${green("↳")} fallback ${dim(displayTarget(target))} ${dim(requestId)}`,
-						);
+						log(`${green("↳")} fallback ${dim(displayTarget(target))} ${dim(requestId)}`);
 					}
 					break;
 				}
@@ -228,9 +211,7 @@ export async function handleMessages(
 					continue;
 				}
 				req.signal.removeEventListener("abort", abortUpstream);
-				error(
-					`Upstream ${response.status}: ${redact(errText).slice(0, 200)}`,
-				);
+				error(`Upstream ${response.status}: ${redact(errText).slice(0, 200)}`);
 				return anthropicError(
 					response.status >= 400 && response.status < 600 ? response.status : 502,
 					mapUpstreamErrorType(response.status),
@@ -242,11 +223,7 @@ export async function handleMessages(
 					(err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
 				if (isAbort && req.signal.aborted) {
 					req.signal.removeEventListener("abort", abortUpstream);
-					return anthropicError(
-						499,
-						"api_error",
-						"Client disconnected.",
-					);
+					return anthropicError(499, "api_error", "Client disconnected.");
 				}
 				if (isAbort) {
 					recordUpstreamError(504);
@@ -338,10 +315,7 @@ export async function handleMessages(
  * performs no upstream work, and Claude Code calls it constantly. Sharing the
  * limiter meant a busy proxy answered its own context accounting with 429.
  */
-export async function handleCountTokens(
-	req: Request,
-	config: Config,
-): Promise<Response> {
+export async function handleCountTokens(req: Request, config: Config): Promise<Response> {
 	if (!isAuthorized(req, config.proxyApiKey)) {
 		return anthropicError(401, "authentication_error", "Invalid proxy API key.");
 	}
@@ -364,7 +338,11 @@ export async function handleCountTokens(
 	try {
 		JSON.parse(bodyText);
 	} catch {
-		return anthropicError(400, "invalid_request_error", "Request body must be valid JSON.");
+		return anthropicError(
+			400,
+			"invalid_request_error",
+			"Request body must be valid JSON.",
+		);
 	}
 	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
 	return Response.json(
@@ -390,11 +368,7 @@ async function handleSync(
 	if (upstreamErr) {
 		const errMsg = extractErrorMessage(upstreamErr, "Upstream returned an error");
 		error(`Upstream error: ${redact(errMsg).slice(0, 200)}`);
-		return anthropicError(
-			502,
-			"api_error",
-			`Upstream error: ${truncate(errMsg, 2000)}`,
-		);
+		return anthropicError(502, "api_error", `Upstream error: ${truncate(errMsg, 2000)}`);
 	}
 
 	const anthropicResult = translateResponse(openaiResult, model);
@@ -444,10 +418,7 @@ function handleStream(
 	};
 	let canceled = false;
 
-	const safeEnqueue = (
-		controller: ReadableStreamDefaultController,
-		data: Uint8Array,
-	) => {
+	const safeEnqueue = (controller: ReadableStreamDefaultController, data: Uint8Array) => {
 		if (canceled) return;
 		try {
 			controller.enqueue(data);
@@ -515,7 +486,9 @@ function handleStream(
 
 					buffer += decoder.decode(value, { stream: true });
 					if (buffer.length > maxBodyBytes) {
-						throw new Error(`SSE stream chunk buffer exceeded maximum size of ${maxBodyBytes} bytes`);
+						throw new Error(
+							`SSE stream chunk buffer exceeded maximum size of ${maxBodyBytes} bytes`,
+						);
 					}
 					const lines = buffer.split("\n");
 					buffer = lines.pop() || "";
@@ -544,10 +517,7 @@ function handleStream(
 					// look like a successfully finished (but empty) response.
 					const msg = stallMessage();
 					error(`${msg} ${dim(requestId)}`);
-					safeEnqueue(
-						controller,
-						encoder.encode(anthropicErrorSse("api_error", msg)),
-					);
+					safeEnqueue(controller, encoder.encode(anthropicErrorSse("api_error", msg)));
 				} else {
 					if (!canceled && buffer.trim().startsWith("data:")) {
 						const trimmed = buffer.trim();
@@ -584,10 +554,7 @@ function handleStream(
 				if (!msg.includes("Controller is already closed")) {
 					error(`Stream error: ${msg}`);
 				}
-				safeEnqueue(
-					controller,
-					encoder.encode(anthropicErrorSse("api_error", msg)),
-				);
+				safeEnqueue(controller, encoder.encode(anthropicErrorSse("api_error", msg)));
 				safeClose(controller);
 			} finally {
 				clearIdleTimer();
@@ -647,10 +614,7 @@ export function resolveTarget(
 	const explicit = parseTarget(requestedModel);
 	// Smart routing only rewrites bare `claude-*` names through the alias table.
 	// A provider-qualified id is already an explicit choice and is left alone.
-	if (
-		!config.smartRouting ||
-		!requestedModel.toLowerCase().startsWith("claude-")
-	) {
+	if (!config.smartRouting || !requestedModel.toLowerCase().startsWith("claude-")) {
 		return explicit;
 	}
 	const requested = requestedModel.toLowerCase();
@@ -679,10 +643,7 @@ export function buildCandidateTargets(
 				Array.isArray(message.content) &&
 				message.content.some((block) => block.type === "image"),
 		) ?? false;
-	const targets = [
-		first,
-		...config.fallbackModels.map((model) => parseTarget(model)),
-	];
+	const targets = [first, ...config.fallbackModels.map((model) => parseTarget(model))];
 	return [
 		...new Map(
 			targets
@@ -697,8 +658,7 @@ export function buildCandidateTargets(
 				.filter((target) => {
 					const capabilities = getCapabilities(target);
 					return (
-						(!needsTools || capabilities.tools) &&
-						(!needsVision || capabilities.vision)
+						(!needsTools || capabilities.tools) && (!needsVision || capabilities.vision)
 					);
 				})
 				.map((target) => [displayTarget(target), target]),
@@ -706,30 +666,21 @@ export function buildCandidateTargets(
 	];
 }
 
-export function isTargetAllowed(
-	target: UpstreamTarget,
-	config: Config,
-): boolean {
+export function isTargetAllowed(target: UpstreamTarget, config: Config): boolean {
 	const id = displayTarget(target);
 	const explicitlyAllowed = config.allowedModels.includes(id);
 	// FREE_MODELS_ONLY rejects paid models unless the operator has explicitly
 	// allowlisted them (ALLOWED_MODELS is an explicit approval list).
-	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed)
-		return false;
+	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed) return false;
 	return !config.allowedModels.length || explicitlyAllowed;
 }
 
 export function globMatches(pattern: string, value: string): boolean {
-	const escaped = pattern
-		.replace(/[.+^${}()|[\]\\?]/g, "\\$&")
-		.replace(/\*/g, ".*");
+	const escaped = pattern.replace(/[.+^${}()|[\]\\?]/g, "\\$&").replace(/\*/g, ".*");
 	return new RegExp(`^${escaped}$`, "i").test(value);
 }
 
-async function readBodyLimited(
-	req: Request,
-	maxBytes: number,
-): Promise<string> {
+async function readBodyLimited(req: Request, maxBytes: number): Promise<string> {
 	const cl = req.headers.get("content-length");
 	if (cl && Number(cl) > maxBytes) {
 		throw new Error("BODY_TOO_LARGE");

@@ -152,9 +152,7 @@ function translateMessage(
  * tool run the client abandoned) must not be echoed: strict gateways reject
  * assistant tool_calls that no tool message follows up on.
  */
-function collectAnsweredToolIds(
-	messages: AnthropicMessage[],
-): ReadonlySet<string> {
+function collectAnsweredToolIds(messages: AnthropicMessage[]): ReadonlySet<string> {
 	const answered = new Set<string>();
 	for (const msg of messages) {
 		if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
@@ -212,9 +210,7 @@ function translateAssistantMessage(
 	return [out];
 }
 
-function translateUserMessage(
-	blocks: AnthropicContentBlock[],
-): OpenAIMessage[] {
+function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] {
 	const result: OpenAIMessage[] = [];
 	const contentParts: unknown[] = [];
 
@@ -248,8 +244,7 @@ function translateUserMessage(
 				data?: string;
 				content?: string;
 			};
-			const text =
-				source?.content || (source?.type === "text" ? source.data : undefined);
+			const text = source?.content || (source?.type === "text" ? source.data : undefined);
 			if (text) {
 				contentParts.push({ type: "text", text: `[Document]\n${text}` });
 			} else if (source?.data && source?.media_type) {
@@ -278,9 +273,7 @@ function translateUserMessage(
 				toolContent = content;
 			} else if (Array.isArray(content)) {
 				toolContent = content
-					.filter(
-						(b) => b && typeof b === "object" && "type" in b && b.type === "text",
-					)
+					.filter((b) => b && typeof b === "object" && "type" in b && b.type === "text")
 					.map((b) => ("text" in b ? String(b.text) : ""))
 					.join("\n");
 			}
@@ -797,8 +790,7 @@ export function uid(): string {
 		return crypto.randomUUID().replace(/-/g, "").slice(0, 16);
 	} catch {
 		return (
-			Math.random().toString(36).slice(2, 10) +
-			Math.random().toString(36).slice(2, 10)
+			Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10)
 		);
 	}
 }
