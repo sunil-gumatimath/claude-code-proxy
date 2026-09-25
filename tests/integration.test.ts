@@ -395,6 +395,43 @@ describe("createServer routing & security", () => {
     expect(json.error.type).toBe("not_found_error");
   });
 
+  test("health is reachable from loopback when no proxy key is set", async () => {
+    const server = createServer(baseConfig);
+    const res = await server.fetch(new Request("http://127.0.0.1:4181/health"));
+    server.stop(true);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { status: string };
+    expect(json.status).toBe("ok");
+  });
+
+  test("health requires the proxy key when one is configured", async () => {
+    // Regression: /health echoed the upstream gateway URL and version with no
+    // auth at all, so it leaked on any non-localhost bind.
+    const server = createServer({ ...baseConfig, proxyApiKey: "s3cret" });
+    const anon = await server.fetch(new Request("http://127.0.0.1:4181/health"));
+    expect(anon.status).toBe(401);
+    const authed = await server.fetch(
+      new Request("http://127.0.0.1:4181/health", {
+        headers: { "x-proxy-api-key": "s3cret" },
+      }),
+    );
+    server.stop(true);
+    expect(authed.status).toBe(200);
+  });
+
+  test("/v1/models reports a stable created timestamp", async () => {
+    const server = createServer(baseConfig);
+    const first = (await (await server.fetch(new Request("http://127.0.0.1:4181/v1/models"))).json()) as {
+      data: Array<{ id: string; created: number }>;
+    };
+    const second = (await (await server.fetch(new Request("http://127.0.0.1:4181/v1/models"))).json()) as {
+      data: Array<{ id: string; created: number }>;
+    };
+    server.stop(true);
+    expect(first.data.length).toBeGreaterThan(0);
+    expect(first.data[0].created).toBe(second.data[0].created);
+  });
+
   test("CORS preflight includes x-proxy-api-key in allowed headers", async () => {
     const cfg: Config = { ...baseConfig, corsAllowedOrigins: ["http://localhost:3000"] };
     const server = createServer(cfg);

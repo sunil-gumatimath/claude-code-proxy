@@ -12,6 +12,9 @@ import { NAME, VERSION } from "./version";
 
 const { cyan, green, dim, bold, yellow } = colors;
 
+/** Frozen once so /v1/models does not report a new creation time on every call. */
+const MODELS_CREATED_AT = Math.floor(Date.now() / 1000);
+
 export function createServer(config: Config) {
   setDebug(config.debug);
 
@@ -21,7 +24,12 @@ export function createServer(config: Config) {
     maxRequestBodySize: config.maxBodyBytes,
     idleTimeout: 255, // max allowed by Bun (seconds) for long streams
     async fetch(req: Request): Promise<Response> {
-      const url = new URL(req.url);
+      let url: URL;
+      try {
+        url = new URL(req.url);
+      } catch {
+        return anthropicError(400, "invalid_request_error", "Malformed request URL.");
+      }
 
       // CORS preflight (optional clients)
       if (req.method === "OPTIONS") {
@@ -37,6 +45,10 @@ export function createServer(config: Config) {
           url.pathname === "/health" ||
           url.pathname === "/healthz")
       ) {
+        // Gated like every other operational endpoint: it echoes the upstream
+        // gateway URL and the proxy version, which should not be public.
+        const denied = requireOperationalAuth(req, config, server);
+        if (denied) return withCors(denied, req, config);
         return Response.json(
           {
             status: "ok",
@@ -77,8 +89,8 @@ export function createServer(config: Config) {
             data: models.map((id) => ({
               id,
               object: "model",
-              created: Math.floor(Date.now() / 1000),
-              owned_by: "claude-code-proxy",
+              created: MODELS_CREATED_AT,
+              owned_by: NAME,
             })),
           },
           { headers: { "Cache-Control": "no-store", ...corsHeaders(req, config) } }
@@ -187,7 +199,14 @@ function requireOperationalAuth(
 		return undefined;
 	}
 
-	const host = new URL(req.url).hostname;
+	// An unparseable request URL is not proof of loopback origin, so deny
+	// rather than fall through: fail closed.
+	let host: string;
+	try {
+		host = new URL(req.url).hostname;
+	} catch {
+		return anthropicError(400, "invalid_request_error", "Malformed request URL.");
+	}
 	const loopback =
 		host === "localhost" ||
 		host === "127.0.0.1" ||
