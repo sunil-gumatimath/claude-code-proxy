@@ -439,7 +439,9 @@ export class StreamTranslator {
 	 */
 	processChunk(data: string): string[] {
 		if (data === "[DONE]") {
-			return this.finalize("stop");
+			// No explicit reason: let finalize() use the finish_reason the
+			// upstream actually sent. Passing "stop" here would discard it.
+			return this.finalize();
 		}
 
 		let chunk: OpenAIChatResponse & {
@@ -664,6 +666,17 @@ export class StreamTranslator {
 		return this.emitFinish(reason);
 	}
 
+	/**
+	 * A turn that emitted a tool_use block must report `tool_use`, whatever the
+	 * upstream's finish_reason said. Some gateways send "stop" alongside a
+	 * completed tool call; the client would then treat the turn as finished and
+	 * never dispatch the tool, silently stalling the agent.
+	 */
+	private resolveStopReason(finishReason: string): string {
+		const mapped = mapFinishReason(finishReason);
+		return this.sawTool && mapped === "end_turn" ? "tool_use" : mapped;
+	}
+
 	private emitFinish(finishReason: string): string[] {
 		if (this.finished) return [];
 		this.finished = true;
@@ -732,7 +745,7 @@ export class StreamTranslator {
 			sse("message_delta", {
 				type: "message_delta",
 				delta: {
-					stop_reason: mapFinishReason(finishReason),
+					stop_reason: this.resolveStopReason(finishReason),
 					stop_sequence: null,
 				},
 				// Anthropic spec: message_delta.usage carries output_tokens only.

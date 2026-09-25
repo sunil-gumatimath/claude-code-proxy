@@ -940,4 +940,104 @@ describe("StreamTranslator", () => {
 		expect(allEvents).toContain('"type":"content_block_start","index":1');
 		expect(allEvents).toContain('"type":"text"');
 	});
+
+	// Regression: handleStream used to call finalize("stop") unconditionally,
+	// so every streamed turn reported end_turn even when the upstream sent
+	// finish_reason "tool_calls". Claude Code reads stop_reason to decide
+	// whether to dispatch a tool, so a streamed tool call was never executed.
+	test("finalize() uses the upstream finish_reason for a tool-calling turn", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{ index: 0, id: "call_1", function: { name: "get_weather", arguments: "" } },
+							],
+						},
+						index: 0,
+					},
+				],
+			}),
+		);
+		t.processChunk(
+			JSON.stringify({
+				choices: [
+					{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"city":"Paris"}' } }] }, index: 0 },
+				],
+			}),
+		);
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls", index: 0 }] }),
+		);
+		// No argument: this is what the streaming handler does.
+		const end = t.finalize().join("");
+		expect(end).toContain('"stop_reason":"tool_use"');
+		expect(end).toContain('"type":"message_stop"');
+	});
+
+	test("[DONE] preserves a pending tool_calls finish_reason", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{ index: 0, id: "call_9", function: { name: "lookup", arguments: "{}" } },
+							],
+						},
+						index: 0,
+					},
+				],
+			}),
+		);
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: {}, finish_reason: "tool_calls", index: 0 }] }),
+		);
+		expect(t.processChunk("[DONE]").join("")).toContain('"stop_reason":"tool_use"');
+	});
+
+	// Belt and braces: even if a gateway says "stop" while emitting a tool
+	// call, the block must still be reported as tool_use.
+	test("a tool_use block forces stop_reason tool_use even when finish_reason is stop", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{ index: 0, id: "call_2", function: { name: "do_thing", arguments: "{}" } },
+							],
+						},
+						index: 0,
+					},
+				],
+			}),
+		);
+		t.processChunk(
+			JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }),
+		);
+		expect(t.finalize().join("")).toContain('"stop_reason":"tool_use"');
+	});
+
+	test("finalize stays idempotent and a repeated call emits nothing", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "hi" }, index: 0 }] }));
+		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop", index: 0 }] }));
+		const first = t.finalize().join("");
+		expect(first).toContain('"type":"message_stop"');
+		expect(t.finalize()).toEqual([]);
+		expect(t.finalize("stop")).toEqual([]);
+		expect(t.isFinished).toBe(true);
+	});
+
+	test("a length finish_reason survives to message_delta", () => {
+		const t = new StreamTranslator("m");
+		t.processChunk(JSON.stringify({ choices: [{ delta: { content: "partial" }, index: 0 }] }));
+		t.processChunk(JSON.stringify({ choices: [{ delta: {}, finish_reason: "length", index: 0 }] }));
+		expect(t.finalize().join("")).toContain('"stop_reason":"max_tokens"');
+	});
 });

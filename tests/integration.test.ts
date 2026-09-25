@@ -225,6 +225,41 @@ describe("handleMessages — streaming", () => {
     expect(out).toContain("event: error");
     expect(out).toContain("stream boom");
   });
+
+  test("a streamed tool-calling turn reports stop_reason tool_use", async () => {
+    // Regression: the handler finalized with a hardcoded "stop", discarding the
+    // upstream's finish_reason. Every streamed turn came back end_turn, so
+    // Claude Code never dispatched the tool. Exercised here (not just in the
+    // translator) because the bug lived in this glue, not in finalize().
+    globalThis.fetch = mock(async () =>
+      sseResponse([
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_weather","arguments":""}}]},"index":0}]}\n\n',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":\\"Paris\\"}"}}]},"index":0}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls","index":0}],"usage":{"prompt_tokens":9,"completion_tokens":7}}\n\n',
+        "data: [DONE]\n\n",
+      ]),
+    ) as unknown as typeof fetch;
+
+    const res = await handleMessages(
+      makeRequest({
+        model: "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "weather in paris?" }],
+        tools: [{ name: "get_weather", input_schema: { type: "object", properties: {} } }],
+      }),
+      baseConfig,
+    );
+
+    expect(res.status).toBe(200);
+    const out = await collectStream(res);
+    expect(out).toContain('"type":"tool_use"');
+    expect(out).toContain('"name":"get_weather"');
+    expect(out).toContain('"stop_reason":"tool_use"');
+    expect(out).not.toContain('"stop_reason":"end_turn"');
+    // Usage from the trailing chunk must still land in message_delta.
+    expect(out).toContain('"output_tokens":7');
+  });
 });
 
 describe("stream idle deadline", () => {

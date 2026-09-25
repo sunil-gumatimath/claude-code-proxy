@@ -471,7 +471,7 @@ function handleStream(
 		async start(controller) {
 			reader = kiloRes.body?.getReader();
 			if (!reader) {
-				for (const ev of translator.finalize("stop")) {
+				for (const ev of translator.finalize()) {
 					safeEnqueue(controller, encoder.encode(ev));
 				}
 				safeClose(controller);
@@ -561,7 +561,7 @@ function handleStream(
 
 					// Always close Anthropic stream cleanly
 					if (!canceled) {
-						for (const ev of translator.finalize("stop")) {
+						for (const ev of translator.finalize()) {
 							safeEnqueue(controller, encoder.encode(ev));
 						}
 					}
