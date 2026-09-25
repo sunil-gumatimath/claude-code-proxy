@@ -1,3 +1,7 @@
+// ============================================================================
+// providers.ts — upstream providers, model capabilities, and id translation
+// ============================================================================
+
 import type { Config } from "./config";
 
 /**
@@ -28,7 +32,25 @@ export interface ModelCapabilities {
 	 * through ALLOWED_MODELS.
 	 */
 	free: boolean;
+	/**
+	 * Upstream `reasoning_effort` values this model accepts, listed in
+	 * ascending order of strength (same order as `ANY_REASONING_EFFORT`).
+	 * Omitted means "pass the client's effort through unchanged". Declaring a
+	 * vocabulary lets `normalizeReasoningEffort` clamp instead of 400-ing on
+	 * an unsupported spelling.
+	 */
+	reasoningEfforts?: readonly string[];
 }
+
+/** Sentinel for "accept whatever the client asked for". */
+export const ANY_REASONING_EFFORT: readonly string[] = [
+	"no_think",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+];
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
@@ -38,6 +60,10 @@ export interface ModelCapabilities {
  * `free: true` means the upstream charges $0 today. The tier rotates as
  * providers end promotions, so re-check the catalog when a model starts
  * returning 404 (retired) or sustained 429 (capacity withdrawn).
+ *
+ * This table is the single source of truth for the free catalog: the default
+ * ALLOWED_MODELS list in config.ts is derived from it, so a model cannot be
+ * added to one and forgotten in the other.
  */
 const CAPABILITIES: Record<string, ModelCapabilities> = {
 	// Routers — no fixed underlying model, so behaviour can change server-side.
@@ -105,6 +131,29 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 	"qwen/qwen-vl-plus": { tools: true, vision: true, free: false },
 	"qwen/qwen-vl-max": { tools: true, vision: true, free: false },
 };
+
+/**
+ * Models with a restricted reasoning-effort vocabulary, matched on an id
+ * fragment. Each vocabulary is listed weakest-first, like ANY_REASONING_EFFORT.
+ */
+const REASONING_VOCABULARIES: ReadonlyArray<{
+	match: RegExp;
+	efforts: readonly string[];
+}> = [
+	// Tencent Hy3 strictly accepts only "no_think", "low", or "high"; anything
+	// else is a 400 rather than a silent downgrade.
+	{ match: /hy3/i, efforts: ["no_think", "low", "high"] },
+];
+
+/**
+ * Every provider-qualified id the capability table marks `free: true`. Used to
+ * derive the default ALLOWED_MODELS so the two cannot drift apart.
+ */
+export function freeModelIds(): string[] {
+	return Object.entries(CAPABILITIES)
+		.filter(([, caps]) => caps.free)
+		.map(([id]) => id);
+}
 
 /** Resolve a provider prefix to its canonical name, or undefined if unknown. */
 function canonicalProvider(prefix: string): ProviderName | undefined {
@@ -186,8 +235,13 @@ export function isFreeTarget(target: UpstreamTarget): boolean {
 
 /**
  * Apply the gateway model prefix (MODEL_PREFIX) to a kilo target. Qwen models
- * are never prefixed. Prefixing lives here — the single place the upstream
- * model name is decided — so translateRequest stays prefix-free.
+ * are never prefixed.
+ *
+ * Prefixing lives here — the single place the upstream model name is decided —
+ * so translateRequest stays prefix-free. Note that the allowlist gate checks
+ * the *unprefixed* provider-qualified id (see routing.isTargetAllowed), so
+ * MODEL_PREFIX is trusted operator configuration, not a client-controlled
+ * value, and is never used to widen what a client may reach.
  */
 export function qualifyModel(target: UpstreamTarget, config: Config): string {
 	if (target.provider !== "kilo" || !config.modelPrefix) return target.model;
@@ -205,20 +259,45 @@ export function getCapabilities(target: UpstreamTarget): ModelCapabilities {
 }
 
 /**
- * Adapt reasoning_effort to upstream requirements.
- * Tencent Hy3 strictly accepts only "no_think", "low", or "high".
+ * The reasoning-effort vocabulary a target accepts, or `ANY_REASONING_EFFORT`
+ * when the upstream takes whatever the client asked for.
+ */
+export function reasoningVocabulary(target: UpstreamTarget): readonly string[] {
+	const declared = CAPABILITIES[displayTarget(target)]?.reasoningEfforts;
+	if (declared) return declared;
+	for (const entry of REASONING_VOCABULARIES) {
+		if (entry.match.test(target.model)) return entry.efforts;
+	}
+	return ANY_REASONING_EFFORT;
+}
+
+/**
+ * Clamp `reasoning_effort` to what the target actually accepts.
+ *
+ * Restricted upstreams (e.g. Tencent Hy3: no_think | low | high) reject the
+ * OpenAI-standard spellings outright, so an unadapted value costs the whole
+ * turn with a 400. Clamping picks the strongest supported effort that is not
+ * stronger than the one requested, so the model never thinks *less* than the
+ * caller asked for. This reproduces the previous hand-written Hy3 mapping
+ * (max/xhigh/high → high, medium/low → low, no_think → no_think) from data
+ * rather than from a model-name substring check.
  */
 export function normalizeReasoningEffort(
 	target: UpstreamTarget,
 	effort?: string,
 ): string | undefined {
 	if (!effort) return undefined;
-	const isHy3 = target.model.toLowerCase().includes("hy3");
-	if (isHy3) {
-		if (effort === "max" || effort === "xhigh" || effort === "high") return "high";
-		if (effort === "medium" || effort === "low") return "low";
-		if (effort === "no_think") return "no_think";
-		return "high";
+	const vocabulary = reasoningVocabulary(target);
+	if (vocabulary === ANY_REASONING_EFFORT) return effort;
+	if (vocabulary.includes(effort)) return effort;
+
+	const requestedIndex = ANY_REASONING_EFFORT.indexOf(effort);
+	// An unrecognised effort has no position on the scale; fall back to the
+	// strongest the upstream accepts, matching the old hardcoded "high".
+	if (requestedIndex === -1) return vocabulary[vocabulary.length - 1];
+	for (let i = requestedIndex; i >= 0; i--) {
+		const candidate = ANY_REASONING_EFFORT[i];
+		if (vocabulary.includes(candidate)) return candidate;
 	}
-	return effort;
+	return vocabulary[0];
 }
