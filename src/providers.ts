@@ -54,7 +54,7 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
- * (GET {KILO_BASE_URL}/models, $0 prompt/completion) plus a live
+ * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-15, plus a live
  * chat/completions tool-use smoke test.
  *
  * `free: true` means the upstream charges $0 today. The tier rotates as
@@ -75,8 +75,14 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 1M
+	}, // 1M, text
+	"kilo/nvidia/nemotron-3.5-super-vl:free": { tools: true, vision: true, free: true }, // 1M, text+image+video
 	"kilo/nvidia/nemotron-3.5-lightning:free": { tools: true, vision: false, free: true }, // 1M
+	"kilo/nvidia/nemotron-3.5-content-safety:free": {
+		tools: false,
+		vision: true,
+		free: true,
+	}, // 128K, text+image classifier — no tool support
 	"kilo/nvidia/nemotron-3-super-120b-a12b:free": {
 		tools: true,
 		vision: false,
@@ -88,20 +94,13 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		free: true,
 	}, // 256K, omni
 
-	"kilo/thinkingmachines/inkling-small:free": { tools: true, vision: true, free: true }, // 1M
-	"kilo/stealth/space-bunny-alpha": { tools: true, vision: true, free: true }, // 1M, text+image+video
-	"kilo/stepfun/step-3.7-flash:free": { tools: true, vision: true, free: true }, // 262K
-	"kilo/qwen/qwen3.8-27b:free": { tools: true, vision: true, free: true }, // 262K
+	"kilo/stealth/glyph-cluster": { tools: true, vision: false, free: true }, // 256K
+	"kilo/thinkingmachines/inkling-small:free": { tools: true, vision: true, free: true }, // 1M, text+image+audio
+	"kilo/stepfun/step-5-preview-free": { tools: true, vision: true, free: true }, // 1M, text+image
 	"kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true, free: true }, // 512K
 	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K
 	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K
 	"kilo/cohere/north-mini-code:free": { tools: true, vision: false, free: true }, // 256K, code-specialised
-	"kilo/inclusionai/ling-3.0-flash-sante:free": {
-		tools: true,
-		vision: false,
-		free: true,
-	}, // 262K
-	"kilo/inclusionai/ling-3.0-flash-fin:free": { tools: true, vision: false, free: true }, // 262K
 	"kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false, free: true }, // 65K, too small for real sessions
 
 	// ── Qwen / DashScope (Alibaba Cloud Model Studio) ───────────────────────
@@ -109,7 +108,10 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 	// spent. They are usable only when the operator allowlists them
 	// (ALLOWED_MODELS) or turns FREE_MODELS_ONLY off.
 	"qwen/qwen3.8-max": { tools: true, vision: true, free: false },
+	"qwen/qwen3.8-max-0902": { tools: true, vision: true, free: false },
 	"qwen/qwen3.8-flash": { tools: true, vision: true, free: false },
+	"qwen/qwen3.8-27b": { tools: true, vision: true, free: false },
+	"qwen/qwen3.8-omni-flash": { tools: true, vision: true, free: false },
 	"qwen/qwen3.7-max": { tools: true, vision: true, free: false },
 	"qwen/qwen3.7-plus": { tools: true, vision: true, free: false },
 	"qwen/qwen3.7-flash": { tools: true, vision: true, free: false },
@@ -121,8 +123,10 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 	"qwen/qwen3-coder-flash": { tools: true, vision: false, free: false },
 	"qwen/qwen3-coder-next": { tools: true, vision: false, free: false },
 	"qwen/deepseek-v4-pro": { tools: true, vision: false, free: false },
+	"qwen/deepseek-v4.1-flash": { tools: true, vision: true, free: false },
 	"qwen/deepseek-v4-flash": { tools: true, vision: false, free: false },
 	"qwen/kimi-k2.7-code": { tools: true, vision: false, free: false },
+	"qwen/kimi-k2.6": { tools: true, vision: false, free: false },
 	"qwen/kimi-k3": { tools: true, vision: true, free: false },
 	"qwen/qwen3-max": { tools: true, vision: false, free: false },
 	"qwen/qwen-plus": { tools: true, vision: false, free: false },

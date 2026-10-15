@@ -18,9 +18,9 @@ const qwen = (model: string) => ({ provider: "qwen", model }) as const;
 
 describe("parseTarget", () => {
 	test("splits a known provider prefix", () => {
-		expect(parseTarget("kilo/stealth/space-bunny-alpha")).toEqual({
+		expect(parseTarget("kilo/nvidia/nemotron-3.5-super-vl:free")).toEqual({
 			provider: "kilo",
-			model: "stealth/space-bunny-alpha",
+			model: "nvidia/nemotron-3.5-super-vl:free",
 		});
 	});
 
@@ -67,7 +67,7 @@ describe("canonicalizeModelId", () => {
 
 describe("displayTarget", () => {
 	test("round-trips through parseTarget", () => {
-		const id = "kilo/stealth/space-bunny-alpha";
+		const id = "kilo/nvidia/nemotron-3.5-super-vl:free";
 		expect(displayTarget(parseTarget(id))).toBe(id);
 	});
 });
@@ -91,15 +91,15 @@ describe("qualifyModel", () => {
 	});
 
 	test("an empty prefix leaves the model untouched", () => {
-		expect(qualifyModel(kilo("stepfun/step-3.7-flash:free"), testConfig())).toBe(
-			"stepfun/step-3.7-flash:free",
+		expect(qualifyModel(kilo("stepfun/step-5-preview-free"), testConfig())).toBe(
+			"stepfun/step-5-preview-free",
 		);
 	});
 });
 
 describe("capability lookups", () => {
 	test("a known model reports its declared capabilities", () => {
-		expect(getCapabilities(kilo("stealth/space-bunny-alpha"))).toMatchObject({
+		expect(getCapabilities(kilo("nvidia/nemotron-3.5-super-vl:free"))).toMatchObject({
 			tools: true,
 			vision: true,
 			free: true,
@@ -139,18 +139,18 @@ describe("capability lookups", () => {
 describe("normalizeReasoningEffort", () => {
 	test("an unset effort stays unset", () => {
 		expect(
-			normalizeReasoningEffort(kilo("stealth/space-bunny-alpha"), undefined),
+			normalizeReasoningEffort(kilo("nvidia/nemotron-3.5-super-vl:free"), undefined),
 		).toBeUndefined();
 		expect(
-			normalizeReasoningEffort(kilo("stealth/space-bunny-alpha"), ""),
+			normalizeReasoningEffort(kilo("nvidia/nemotron-3.5-super-vl:free"), ""),
 		).toBeUndefined();
 	});
 
 	test("an unrestricted model passes every standard spelling through", () => {
 		for (const effort of ANY_REASONING_EFFORT) {
-			expect(normalizeReasoningEffort(kilo("stealth/space-bunny-alpha"), effort)).toBe(
-				effort,
-			);
+			expect(
+				normalizeReasoningEffort(kilo("nvidia/nemotron-3.5-super-vl:free"), effort),
+			).toBe(effort);
 		}
 	});
 

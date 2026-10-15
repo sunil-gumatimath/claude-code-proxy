@@ -96,7 +96,10 @@ describe("isTargetAllowed", () => {
 	test("allowlisted free model → true", () => {
 		const cfg = testConfig();
 		expect(
-			isTargetAllowed({ provider: "kilo", model: "stealth/space-bunny-alpha" }, cfg),
+			isTargetAllowed(
+				{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
+				cfg,
+			),
 		).toBe(true);
 		expect(
 			isTargetAllowed({ provider: "kilo", model: "poolside/laguna-s-2.1:free" }, cfg),
@@ -113,7 +116,7 @@ describe("isTargetAllowed", () => {
 	});
 
 	test("model absent from a non-empty allowlist → false", () => {
-		const cfg = testConfig({ allowedModels: ["kilo/stealth/space-bunny-alpha"] });
+		const cfg = testConfig({ allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free"] });
 		expect(
 			isTargetAllowed({ provider: "kilo", model: "poolside/laguna-s-2.1:free" }, cfg),
 		).toBe(false);
@@ -232,15 +235,15 @@ describe("resolveTarget", () => {
 	test("claude-* with an image routes to VISION_MODEL", () => {
 		expect(resolveTarget("claude-sonnet-4-20250514", imageBody, testConfig())).toEqual({
 			provider: "kilo",
-			model: "stealth/space-bunny-alpha",
+			model: "nvidia/nemotron-3.5-super-vl:free",
 		});
 	});
 
 	test("a custom VISION_MODEL is honoured", () => {
-		const cfg = testConfig({ visionModel: "kilo/stepfun/step-3.7-flash:free" });
+		const cfg = testConfig({ visionModel: "kilo/stepfun/step-5-preview-free" });
 		expect(resolveTarget("claude-sonnet-4", imageBody, cfg)).toEqual({
 			provider: "kilo",
-			model: "stepfun/step-3.7-flash:free",
+			model: "stepfun/step-5-preview-free",
 		});
 	});
 
@@ -283,37 +286,40 @@ describe("resolveTarget", () => {
 describe("buildCandidateTargets", () => {
 	test("requested model leads, fallbacks follow", () => {
 		const targets = buildCandidateTargets(
-			{ provider: "kilo", model: "stealth/space-bunny-alpha" },
+			{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
 			textBody,
 			testConfig(),
 		);
-		expect(targets[0]).toEqual({ provider: "kilo", model: "stealth/space-bunny-alpha" });
+		expect(targets[0]).toEqual({
+			provider: "kilo",
+			model: "nvidia/nemotron-3.5-super-vl:free",
+		});
 		expect(targets.length).toBeGreaterThan(1);
 	});
 
 	test("duplicates collapse while preserving first-seen order", () => {
 		const cfg = testConfig({
 			fallbackModels: [
-				"kilo/stealth/space-bunny-alpha", // same as the requested target
+				"kilo/nvidia/nemotron-3.5-super-vl:free", // same as the requested target
 				"kilo/poolside/laguna-s-2.1:free",
 				"kilo/poolside/laguna-s-2.1:free", // explicit duplicate
 			],
 		});
 		const targets = buildCandidateTargets(
-			{ provider: "kilo", model: "stealth/space-bunny-alpha" },
+			{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
 			textBody,
 			cfg,
 		);
 		const ids = targets.map((t) => `${t.provider}/${t.model}`);
 		expect(new Set(ids).size).toBe(ids.length);
-		expect(ids[0]).toBe("kilo/stealth/space-bunny-alpha");
+		expect(ids[0]).toBe("kilo/nvidia/nemotron-3.5-super-vl:free");
 	});
 
 	test("a provider with no key and no request key yields no candidates", () => {
 		const cfg = testConfig({ kiloApiKey: "", qwenApiKey: "" });
 		expect(
 			buildCandidateTargets(
-				{ provider: "kilo", model: "stealth/space-bunny-alpha" },
+				{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
 				textBody,
 				cfg,
 			),
@@ -322,7 +328,10 @@ describe("buildCandidateTargets", () => {
 
 	test("a request-supplied key enables a provider that has no config key", () => {
 		const cfg = testConfig({ kiloApiKey: "", qwenApiKey: "" });
-		const first = { provider: "kilo" as const, model: "stealth/space-bunny-alpha" };
+		const first = {
+			provider: "kilo" as const,
+			model: "nvidia/nemotron-3.5-super-vl:free",
+		};
 		expect(buildCandidateTargets(first, textBody, cfg)).toHaveLength(0);
 		expect(
 			buildCandidateTargets(first, textBody, cfg, "sk-request-key").length,
@@ -336,10 +345,10 @@ describe("buildCandidateTargets", () => {
 			kiloApiKey: "",
 			qwenApiKey: "",
 			fallbackModels: ["qwen/qwen3-max"],
-			allowedModels: ["kilo/stealth/space-bunny-alpha", "qwen/qwen3-max"],
+			allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free", "qwen/qwen3-max"],
 		});
 		const targets = buildCandidateTargets(
-			{ provider: "kilo", model: "stealth/space-bunny-alpha" },
+			{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
 			textBody,
 			cfg,
 			"sk-request-key",
@@ -349,7 +358,7 @@ describe("buildCandidateTargets", () => {
 
 	test("unapproved paid fallbacks are dropped", () => {
 		const cfg = testConfig({
-			allowedModels: ["kilo/stealth/space-bunny-alpha"],
+			allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free"],
 			fallbackModels: ["kilo/paid-model"],
 		});
 		expect(
@@ -359,7 +368,7 @@ describe("buildCandidateTargets", () => {
 
 	test("an allowlisted paid model survives as a candidate", () => {
 		const cfg = testConfig({
-			allowedModels: ["kilo/paid-model", "kilo/stealth/space-bunny-alpha"],
+			allowedModels: ["kilo/paid-model", "kilo/nvidia/nemotron-3.5-super-vl:free"],
 			fallbackModels: ["kilo/paid-model"],
 		});
 		expect(
@@ -415,7 +424,7 @@ describe("buildCandidateTargets", () => {
 
 	test("a tools request keeps a tool-capable model", () => {
 		const targets = buildCandidateTargets(
-			{ provider: "kilo", model: "stealth/space-bunny-alpha" },
+			{ provider: "kilo", model: "nvidia/nemotron-3.5-super-vl:free" },
 			{ messages: [{ role: "user", content: "hi" }], tools: [{ name: "t" }] },
 			testConfig(),
 		);

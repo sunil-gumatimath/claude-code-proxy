@@ -199,9 +199,9 @@ describe("handleMessages — fallback", () => {
 		// Kilo fails, so the chain falls through to the allowlisted Qwen model.
 		// Each provider must receive its own credential, never the other's.
 		const cfg = testConfig({
-			defaultModel: "kilo/stealth/space-bunny-alpha",
+			defaultModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 			fallbackModels: ["qwen/qwen3-max"],
-			allowedModels: ["kilo/stealth/space-bunny-alpha", "qwen/qwen3-max"],
+			allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free", "qwen/qwen3-max"],
 		});
 		const auths: string[] = [];
 		let call = 0;
@@ -251,9 +251,9 @@ describe("handleMessages — fallback", () => {
 		// Now cool *both* models, then confirm the next request still tries.
 		const { getRuntime } = await import("../src/runtime");
 		const { cooldowns } = getRuntime(cfg);
-		cooldowns.fail("kilo/stealth/space-bunny-alpha");
+		cooldowns.fail("kilo/nvidia/nemotron-3.5-super-vl:free");
 		cooldowns.fail("kilo/poolside/laguna-s-2.1:free");
-		expect(cooldowns.isCooling("kilo/stealth/space-bunny-alpha")).toBe(true);
+		expect(cooldowns.isCooling("kilo/nvidia/nemotron-3.5-super-vl:free")).toBe(true);
 
 		const models: string[] = [];
 		globalThis.fetch = mock(async (_url: any, init: any) => {
@@ -262,7 +262,7 @@ describe("handleMessages — fallback", () => {
 		}) as unknown as typeof fetch;
 		const res = await handleMessages(messagesRequest(simpleBody()), cfg);
 		expect(res.status).toBe(200);
-		expect(models[0]).toBe("stealth/space-bunny-alpha");
+		expect(models[0]).toBe("nvidia/nemotron-3.5-super-vl:free");
 	});
 
 	test("a 400 is returned to the client without burning the fallback chain", async () => {
@@ -565,9 +565,9 @@ describe("handleMessages — validation", () => {
 		const cfg = testConfig({
 			kiloApiKey: "",
 			qwenApiKey: "qwen-key",
-			defaultModel: "kilo/stealth/space-bunny-alpha",
+			defaultModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 			fallbackModels: ["qwen/qwen3-max"],
-			allowedModels: ["kilo/stealth/space-bunny-alpha", "qwen/qwen3-max"],
+			allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free", "qwen/qwen3-max"],
 		});
 		const auths: string[] = [];
 		let call = 0;

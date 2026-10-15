@@ -15,23 +15,23 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		proxyApiKey: "",
 		kiloBaseUrl: "https://api.kilo.ai/api/gateway",
 		modelPrefix: "",
-		defaultModel: "kilo/stealth/space-bunny-alpha",
+		defaultModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 		fallbackModels: [
 			"kilo/poolside/laguna-s-2.1:free",
 			"kilo/cohere/north-mini-code:free",
-			"kilo/stepfun/step-3.7-flash:free",
+			"kilo/stepfun/step-5-preview-free",
 		],
 		allowedModels: [
-			"kilo/stealth/space-bunny-alpha",
+			"kilo/nvidia/nemotron-3.5-super-vl:free",
 			"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 			"kilo/poolside/laguna-s-2.1:free",
 			"kilo/cohere/north-mini-code:free",
-			"kilo/stepfun/step-3.7-flash:free",
+			"kilo/stepfun/step-5-preview-free",
 		],
 		freeModelsOnly: true,
-		visionModel: "kilo/stealth/space-bunny-alpha",
+		visionModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 		modelAliases: [
-			{ pattern: "*haiku*", model: "kilo/stealth/space-bunny-alpha" },
+			{ pattern: "*haiku*", model: "kilo/nvidia/nemotron-3.5-super-vl:free" },
 			{ pattern: "*sonnet*", model: "kilo/poolside/laguna-s-2.1:free" },
 			{ pattern: "*opus*", model: "kilo/cohere/north-mini-code:free" },
 		],
@@ -67,7 +67,7 @@ export function simpleBody(
 	overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
 	return {
-		model: "kilo/stealth/space-bunny-alpha",
+		model: "kilo/nvidia/nemotron-3.5-super-vl:free",
 		max_tokens: 100,
 		messages: [{ role: "user", content: "hi" }],
 		...overrides,

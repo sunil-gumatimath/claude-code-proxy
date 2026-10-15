@@ -92,18 +92,18 @@ subset.
 | `PROXY_API_KEY` | *(unset)* | **Any non-loopback bind.** `POST /v1/messages` is not loopback-restricted |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
-| `DEFAULT_MODEL` | `kilo/stealth/space-bunny-alpha` | Pick a different primary model |
-| `FALLBACK_MODELS` | Nemotron Ultra → North Mini → Step 3.7 → Nemotron Nano → Auto Free | Control fallback order after upstream failures |
+| `DEFAULT_MODEL` | `kilo/stepfun/step-5-preview-free` | Pick a different primary model |
+| `FALLBACK_MODELS` | whole free tier, strongest first (13 models) | Control fallback order after upstream failures |
 | `ALLOWED_MODELS` | every free Kilo model | Narrow the approval list, or opt in a paid model |
 | `FREE_MODELS_ONLY` | `true` | Set `false` to allow paid models that are allowlisted |
-| `VISION_MODEL` | `kilo/stealth/space-bunny-alpha` | Your primary cannot read images |
+| `VISION_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Your primary cannot read images — or you want the video-capable model for image turns |
 | `REASONING_EFFORT` | *(empty)* | Force upstream reasoning; leave empty unless a model feels too slow |
 | `UPSTREAM_TIMEOUT_MS` | `120000` | Raise for a genuinely slow model; lower to fail over sooner |
 | `MAX_CONCURRENT_REQUESTS` | `4` | Raise if Claude Code parallelises more than four turns |
 | `MAX_QUEUED_REQUESTS` | `20` | Set `0` to fail fast with `429` instead of queueing |
 | `MODEL_COOLDOWN_MS` | `30000` | How long a failing model is skipped |
 | `MAX_BODY_BYTES` | `20971520` | Raise for very large images or file attachments |
-| `MODEL_ALIASES` | haiku/sonnet/opus → Space Bunny | Route bare `claude-*` names yourself |
+| `MODEL_ALIASES` | haiku → Nemotron Lightning, sonnet/opus → Step 5 Preview | Route bare `claude-*` names yourself |
 | `SMART_ROUTING` | `true` | Set `false` to disable alias and vision rerouting entirely |
 | `UPSTREAM_CA_FILE` | *(empty)* | Corporate HTTPS inspection (preferred over disabling verification) |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Only if a browser calls the proxy; Claude Code does not |
@@ -126,7 +126,7 @@ subset.
 >
 > ```env
 > QWEN_API_KEY=sk-...
-> ALLOWED_MODELS=kilo/stealth/space-bunny-alpha,qwen/qwen3.7-max,qwen/qwen3-coder-plus
+> ALLOWED_MODELS=kilo/stepfun/step-5-preview-free,qwen/qwen3.7-max,qwen/qwen3-coder-plus
 > ```
 
 > **Never commit `.env`.** It is gitignored. Only share `.env.example`.
@@ -258,7 +258,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stealth/space-bunny-alpha",
+    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
@@ -269,7 +269,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
 | Key | Why |
 |-----|-----|
 | `ANTHROPIC_MODEL` | Must be provider-qualified (`kilo/…` or `qwen/…`) or a `claude-*` name the alias table can route |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Space Bunny Alpha and Nemotron Ultra are `1000000`; Laguna S 2.1 is `262144` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Step 5 Preview, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Glyph Cluster and Laguna S 2.1 are `262144` |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Matches the proxy's hard `max_tokens` cap of `16384` |
 | `ANTHROPIC_API_KEY` | Set to `""` if present, so Claude Code cannot call real Anthropic |
 
@@ -302,9 +302,9 @@ On Windows the file is `%USERPROFILE%\.claude\settings.json`. Restart with
 | *(empty, default)* | Derive effort from Claude Code's `thinking.budget_tokens` |
 | `low` / `medium` / `high` / `xhigh` / `max` | Force that effort on every turn, whether or not the client asked for thinking |
 
-`high` is a good fit for Space Bunny Alpha, which advertises `reasoning_effort`
-support directly. Leaving it empty is the conservative choice if a model feels
-slow.
+`high` is a good fit for Step 5 Preview and Nemotron 3.5 Super VL, which both
+advertise `reasoning_effort` support directly. Leaving it empty is the
+conservative choice if a model feels slow.
 
 Some upstreams accept only a subset of these spellings. Tencent Hy3, for
 example, takes only `no_think`, `low`, and `high`, and rejects anything else
@@ -334,7 +334,7 @@ curl http://127.0.0.1:4181/health
 # A real upstream round trip
 curl -s http://127.0.0.1:4181/v1/messages \
   -H 'content-type: application/json' \
-  -d '{"model":"kilo/stealth/space-bunny-alpha","max_tokens":64,
+  -d '{"model":"kilo/stepfun/step-5-preview-free","max_tokens":64,
        "messages":[{"role":"user","content":"Reply with the single word: OK"}]}'
 
 # Token accounting (local estimate, never touches upstream)

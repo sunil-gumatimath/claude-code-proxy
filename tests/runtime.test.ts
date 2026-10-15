@@ -227,7 +227,7 @@ describe("getRuntime", () => {
 
 describe("prometheusMetrics", () => {
 	test("exports the saturation and latency series operators are told to watch", () => {
-		recordModelRequest("kilo/stealth/space-bunny-alpha");
+		recordModelRequest("kilo/nvidia/nemotron-3.5-super-vl:free");
 		recordUpstreamError(429);
 		const out = prometheusMetrics();
 		for (const name of [

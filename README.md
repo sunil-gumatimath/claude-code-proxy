@@ -53,7 +53,7 @@ Point Claude Code at it — for a persistent setup, put this in
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stealth/space-bunny-alpha",
+    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384"
   }
@@ -77,7 +77,7 @@ me for a Kilo API key (never print or expose it), start the proxy with
 `bun run start`, verify http://127.0.0.1:4181/health returns "ok", then merge
 an `env` block into ~/.claude/settings.json per README's "Configure Claude
 Code" section with ANTHROPIC_BASE_URL=http://127.0.0.1:4181,
-ANTHROPIC_MODEL=kilo/stealth/space-bunny-alpha, and
+ANTHROPIC_MODEL=kilo/stepfun/step-5-preview-free, and
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 — back the file up first and do not
 overwrite existing keys. Prefer UPSTREAM_CA_FILE for TLS problems; use
 UPSTREAM_TLS_REJECT_UNAUTHORIZED=false only after explaining the risk. Confirm
@@ -87,20 +87,27 @@ one small /v1/messages request succeeds and report anything I still need to do.
 ## Recommended free model
 
 ```env
-DEFAULT_MODEL=kilo/stealth/space-bunny-alpha
+DEFAULT_MODEL=kilo/stepfun/step-5-preview-free
 REASONING_EFFORT=high
 ```
 
-Space Bunny Alpha is the default primary: an anonymous large model on Kilo's
-free tier with **1M-token context**, native **image and video** input, explicit
-`reasoning_effort` support, and roughly 1.2s median latency. Because it handles
-vision natively it is also the `VISION_MODEL`, so image requests need no reroute.
+Step 5 Preview is the default primary: StepFun's flagship agentic model on Kilo's
+free tier with **1M-token context**, native **image** input, tool calling,
+structured outputs, and up to 64K output tokens — built for software engineering
+and long-horizon workflows. `VISION_MODEL` points at **Nemotron 3.5 Super VL**
+(1M context, native image *and video*), so video input reroutes to a purpose-built
+multimodal model.
 
-`FALLBACK_MODELS` then works down through `nvidia/nemotron-3-ultra-550b-a55b:free`
-(1M, next strongest), `cohere/north-mini-code:free` (fast, code-specialised),
-`stepfun/step-3.7-flash:free` (vision), `nemotron-3-nano-omni-...-reasoning:free`
-(omni), and finally `kilo/kilo-auto/free` — Kilo's own free router, kept last
-because it resolves server-side to a smaller model for free accounts.
+`FALLBACK_MODELS` then walks the whole free tier, strongest first — Nemotron 3.5
+Super VL (vision), the **Glyph Cluster** stealth frontier model, Nemotron Ultra
+(1M), Inkling Small (multimodal), Dots 3 Note (vision), Nemotron Lightning (fast),
+Nemotron Super 120B, Laguna S 2.1 (coding), North Mini Code (code-specialised),
+Laguna XS 2.1, Nemotron Nano Omni (omni), OpenRouter Free, and finally
+`kilo/kilo-auto/free` — Kilo's own free router, kept last because it resolves
+server-side to a smaller model for free accounts.
+
+`MODEL_ALIASES` tiers the bare `claude-*` names: Opus and Sonnet both route to
+Step 5 Preview, Haiku to the fast Nemotron 3.5 Lightning.
 
 `REASONING_EFFORT=high` forces high reasoning on every turn. Clear it to derive
 effort from Claude Code's thinking budget instead.
@@ -132,7 +139,7 @@ missing) so every session points at the proxy and the model you want:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stealth/space-bunny-alpha",
+    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
@@ -148,12 +155,13 @@ Notes:
   `KILO_API_KEY` is set in `.env`). Set `ANTHROPIC_API_KEY` to `""` so Claude
   Code never calls real Anthropic by mistake.
 - `ANTHROPIC_MODEL` names the model Claude Code asks for. Use a
-  provider-qualified ID (e.g. `kilo/stealth/space-bunny-alpha`) to bypass the
+  provider-qualified ID (e.g. `kilo/stepfun/step-5-preview-free`) to bypass the
   alias table, or a `claude-*` name to let `MODEL_ALIASES` route it.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
-  context size of whichever model you actually run (1M for Space Bunny Alpha and
-  Nemotron Ultra, 262144 for Laguna S 2.1).
+  context size of whichever model you actually run (1M for Step 5 Preview,
+  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Glyph Cluster and Laguna
+  S 2.1).
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the proxy's hard cap of `16384`
   on `max_tokens`, so Claude Code budgets against what it can actually get.
   Requests above the cap are clamped, and the clamp is logged.
@@ -194,11 +202,11 @@ that; it documents each one inline.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `DEFAULT_MODEL` | `kilo/stealth/space-bunny-alpha` | Model used when the client omits one |
+| `DEFAULT_MODEL` | `kilo/stepfun/step-5-preview-free` | Model used when the client omits one |
 | `FALLBACK_MODELS` | built-in list | Tried in order after a temporary upstream failure |
 | `ALLOWED_MODELS` | every `free: true` model | Explicit approval list — anything else is rejected |
 | `FREE_MODELS_ONLY` | `true` | Also reject paid models. Set `false` to allow allowlisted paid models |
-| `VISION_MODEL` | `kilo/stealth/space-bunny-alpha` | Model used for image requests when smart routing applies |
+| `VISION_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Model used for image requests when smart routing applies |
 | `MODEL_ALIASES` | built-in list | `pattern=model` pairs; `*` is a wildcard. Patterns only match bare `claude-*` names |
 | `SMART_ROUTING` | `true` | Apply `MODEL_ALIASES` and `VISION_MODEL` to bare `claude-*` model names |
 | `REASONING_EFFORT` | *(empty)* | Force `low`/`medium`/`high`/`xhigh`/`max`/`no_think`. Empty derives effort from the thinking budget |
@@ -330,7 +338,7 @@ reject on the next turn.
 
 ```bash
 curl http://127.0.0.1:4181/health
-bun test          # 238 unit + integration tests
+bun test          # 250 unit + integration tests
 bun run typecheck # tsc --noEmit
 bun run dev       # --watch reload
 bun run check     # format + lint + typecheck + test, as CI runs it
