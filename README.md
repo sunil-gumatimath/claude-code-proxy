@@ -112,6 +112,31 @@ Step 5 Preview, Haiku to the fast Nemotron 3.5 Lightning.
 `REASONING_EFFORT=high` forces high reasoning on every turn. Clear it to derive
 effort from Claude Code's thinking budget instead.
 
+### Current free models
+
+Verified against the live Kilo catalog on **2026-10-15** — every one bills `$0`
+today. All support tool calling except the content-safety classifier; `✗` marks
+that one.
+
+| Model | Context | Input | Tools | Role |
+| --- | --- | --- | --- | --- |
+| `kilo/stepfun/step-5-preview-free` | 1M | text, image | ✓ | **default primary** — agentic/coding flagship |
+| `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default vision model** |
+| `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth frontier model |
+| `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | text | ✓ | 550B MoE (55B active) |
+| `kilo/thinkingmachines/inkling-small:free` | 1M | text, image, audio | ✓ | multimodal |
+| `kilo/nvidia/nemotron-3.5-lightning:free` | 1M | text | ✓ | fast — the `haiku` alias target |
+| `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | |
+| `kilo/nvidia/nemotron-3-super-120b-a12b:free` | 262K | text | ✓ | 120B MoE (12B active) |
+| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent |
+| `kilo/cohere/north-mini-code:free` | 256K | text | ✓ | code-specialised |
+| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent |
+| `kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | text, image | ✓ | omni |
+| `kilo/openrouter/free` | 200K | text, image | ✓ | OpenRouter free router |
+| `kilo/kilo-auto/free` | 256K | text | ✓ | Kilo's own free router |
+| `kilo/liquid/lfm-2.5-2.6b:free` | 65K | text | ✓ | tiny (2.6B) — rarely worth it |
+| `kilo/nvidia/nemotron-3.5-content-safety:free` | 128K | text, image | ✗ | classifier, no tool support |
+
 Kilo's free tier rotates as providers end promotions, and the proxy already
 fails over and cools down dead models automatically. To re-check what is free
 right now:
@@ -366,6 +391,9 @@ Layout:
 | `runtime.ts` | Capacity limiter, cooldowns, metrics |
 | `errors.ts` | Anthropic-shaped error responses |
 | `log.ts` | Console logging, redaction, debug sanitisation |
+| `types.ts` | Shared Anthropic / OpenAI request and response shapes |
+| `version.ts` | Name and version, read from `package.json` |
+| `index.ts` | Entry point — loads config, starts the server |
 
 ## Security
 
