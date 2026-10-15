@@ -118,7 +118,7 @@ interface StreamReader {
 	cancel(reason?: unknown): Promise<void>;
 }
 
-export interface StreamPumpOptions {
+interface StreamPumpOptions {
 	/** Model name reported to the client in message_start. */
 	model: string;
 	/** Echoed back as x-request-id for client-side correlation. */

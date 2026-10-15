@@ -22,7 +22,7 @@ export interface UpstreamTarget {
 	model: string;
 }
 
-export interface ModelCapabilities {
+interface ModelCapabilities {
 	tools: boolean;
 	vision: boolean;
 	/**

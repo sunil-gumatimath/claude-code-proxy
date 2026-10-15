@@ -13,7 +13,7 @@ import {
 import type { ReasoningEffort } from "./types";
 
 /** The environment slice config reads. Injected so the parsing is testable. */
-export type Env = Record<string, string | undefined>;
+type Env = Record<string, string | undefined>;
 
 /**
  * Read a positive integer. `min` allows 0 where the setting is a meaningful
@@ -237,5 +237,3 @@ export function isLoopbackHost(host: string): boolean {
 	// IPv4 loopback, and IPv4-mapped IPv6 loopback.
 	return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(bare) || bare === "::ffff:127.0.0.1";
 }
-
-export type { Config as AppConfig };

@@ -6,7 +6,7 @@ import type { Config } from "./config";
 
 // ─── Metrics ─────────────────────────────────────────────────────────────────
 
-export interface ProxyMetricsSnapshot {
+interface ProxyMetricsSnapshot {
 	requestsTotal: number;
 	requestsActive: number;
 	streamsActive: number;

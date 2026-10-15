@@ -2,28 +2,28 @@
 // types.ts — Shared Anthropic / OpenAI shapes used by the proxy
 // ============================================================================
 
-export type Role = "user" | "assistant" | "system" | "tool";
+type Role = "user" | "assistant" | "system" | "tool";
 
 export interface AnthropicTextBlock {
 	type: "text";
 	text: string;
 }
 
-export interface AnthropicImageBlock {
+interface AnthropicImageBlock {
 	type: "image";
 	source:
 		| { type: "base64"; media_type: string; data: string }
 		| { type: "url"; url: string };
 }
 
-export interface AnthropicToolUseBlock {
+interface AnthropicToolUseBlock {
 	type: "tool_use";
 	id: string;
 	name: string;
 	input: unknown;
 }
 
-export interface AnthropicToolResultBlock {
+interface AnthropicToolResultBlock {
 	type: "tool_result";
 	tool_use_id: string;
 	content?: string | AnthropicTextBlock[];
@@ -54,13 +54,13 @@ export interface AnthropicMessage {
 	content: string | AnthropicContentBlock[];
 }
 
-export interface AnthropicTool {
+interface AnthropicTool {
 	name: string;
 	description?: string;
 	input_schema?: Record<string, unknown>;
 }
 
-export interface AnthropicToolChoice {
+interface AnthropicToolChoice {
 	type: "auto" | "any" | "tool" | "none";
 	name?: string;
 	disable_parallel_tool_use?: boolean;
@@ -81,7 +81,7 @@ export interface AnthropicMessagesRequest {
 	[key: string]: unknown;
 }
 
-export interface AnthropicUsage {
+interface AnthropicUsage {
 	input_tokens: number;
 	output_tokens: number;
 }
@@ -97,7 +97,7 @@ export interface AnthropicMessageResponse {
 	usage: AnthropicUsage;
 }
 
-export interface OpenAIToolCall {
+interface OpenAIToolCall {
 	/**
 	 * Optional: some OpenAI-compatible gateways omit the id (typically on a
 	 * trailing chunk), so the translator must tolerate its absence.

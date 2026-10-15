@@ -63,7 +63,7 @@ export function canFallback(
 	return attempt < totalAttempts - 1 && isTransientStatus(status);
 }
 
-export type UpstreamOutcome =
+type UpstreamOutcome =
 	| {
 			ok: true;
 			response: Response;
@@ -79,7 +79,7 @@ export type UpstreamOutcome =
 	  }
 	| { ok: false; response: Response };
 
-export interface UpstreamCall {
+interface UpstreamCall {
 	config: Config;
 	/** Aborted when the client disconnects; forwarded to every attempt. */
 	signal: AbortSignal;
