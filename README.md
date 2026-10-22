@@ -53,7 +53,7 @@ Point Claude Code at it — for a persistent setup, put this in
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
+    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384"
   }
@@ -77,7 +77,7 @@ me for a Kilo API key (never print or expose it), start the proxy with
 `bun run start`, verify http://127.0.0.1:4181/health returns "ok", then merge
 an `env` block into ~/.claude/settings.json per README's "Configure Claude
 Code" section with ANTHROPIC_BASE_URL=http://127.0.0.1:4181,
-ANTHROPIC_MODEL=kilo/stepfun/step-5-preview-free, and
+ANTHROPIC_MODEL=kilo/reflection/beam-free, and
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 — back the file up first and do not
 overwrite existing keys. Prefer UPSTREAM_CA_FILE for TLS problems; use
 UPSTREAM_TLS_REJECT_UNAUTHORIZED=false only after explaining the risk. Confirm
@@ -87,63 +87,70 @@ one small /v1/messages request succeeds and report anything I still need to do.
 ## Recommended free model
 
 ```env
-DEFAULT_MODEL=kilo/stepfun/step-5-preview-free
+DEFAULT_MODEL=kilo/reflection/beam-free
 REASONING_EFFORT=high
 ```
 
-Step 5 Preview is the default primary: StepFun's flagship agentic model on Kilo's
-free tier with **1M-token context**, native **image** input, tool calling,
-structured outputs, and up to 64K output tokens — built for software engineering
-and long-horizon workflows. `VISION_MODEL` points at **Nemotron 3.5 Super VL**
-(1M context, native image *and video*), so video input reroutes to a purpose-built
+Beam 1.0 (free) is the default primary: Reflection's reasoning model for coding
+and agentic workflows, on Kilo's free tier with **1M-token context**, function
+calling, structured outputs, streaming, and up to 131K output tokens — built
+for software engineering and long-horizon workflows. As with every current Kilo
+free-tier model, prompts are retained for training; that is the price of the
+$0 tier. `VISION_MODEL` points at **Nemotron 3.5 Super VL** (1M context, native
+image *and video*), so image/video input reroutes to a purpose-built
 multimodal model.
 
-`FALLBACK_MODELS` then walks the whole free tier, strongest first — Nemotron 3.5
-Super VL (vision), the **Glyph Cluster** stealth frontier model, Nemotron Ultra
-(1M), Inkling Small (multimodal), Dots 3 Note (vision), Nemotron Lightning (fast),
-Nemotron Super 120B, Laguna S 2.1 (coding), North Mini Code (code-specialised),
-Laguna XS 2.1, Nemotron Nano Omni (omni), OpenRouter Free, and finally
-`kilo/kilo-auto/free` — Kilo's own free router, kept last because it resolves
-server-side to a smaller model for free accounts.
+`FALLBACK_MODELS` walks the whole free tier, strongest first — Nemotron 3.5
+Super VL (vision+video), a second Beam copy (as backup when called by name),
+the **Glyph Cluster** stealth frontier model (256K output tokens), Nemotron
+Ultra (1M, 550B MoE), Flint v1.0 (40B MoE built for coding agents), Dots 3 Note
+(vision, expires 2026-12-31), Nemotron Lightning (fast), Nemotron Super 120B,
+Laguna S 2.1 (coding, expires 2026-10-31), North Mini Code (code-specialised),
+Xing4.0 (29B MoE), Laguna XS 2.1, Nemotron Nano Omni (omni), OpenRouter Free,
+and finally `kilo/kilo-auto/free` — Kilo's own free router, kept last because it
+resolves server-side to a smaller model for free accounts.
 
 `MODEL_ALIASES` tiers the bare `claude-*` names: Opus and Sonnet both route to
-Step 5 Preview, Haiku to the fast Nemotron 3.5 Lightning.
+Beam, Haiku to the fast Nemotron 3.5 Lightning.
 
 `REASONING_EFFORT=high` forces high reasoning on every turn. Clear it to derive
 effort from Claude Code's thinking budget instead.
 
 ### Current free models
 
-Verified against the live Kilo catalog on **2026-10-15** — every one bills `$0`
+Verified against the live Kilo catalog on **2026-10-22** — every one bills `$0`
 today. All support tool calling except the content-safety classifier; `✗` marks
-that one.
+that one. Since the previous check (2026-10-15), `stepfun/step-5-preview-free`
+and `thinkingmachines/inkling-small:free` were retired (only paid variants
+remain) and Beam, Flint, and Xing4.0 joined.
 
 | Model | Context | Input | Tools | Role |
 | --- | --- | --- | --- | --- |
-| `kilo/stepfun/step-5-preview-free` | 1M | text, image | ✓ | **default primary** — agentic/coding flagship |
-| `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default vision model** |
-| `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth frontier model |
+| `kilo/reflection/beam-free` | 1M | text | ✓ | **default primary** — coding/agentic reasoning, 131K output |
+| `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default vision model**, 131K output |
+| `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth frontier model, 256K output |
 | `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | text | ✓ | 550B MoE (55B active) |
-| `kilo/thinkingmachines/inkling-small:free` | 1M | text, image, audio | ✓ | multimodal |
+| `kilo/recursive/flint-v1.0:free` | 262K | text | ✓ | 40B MoE (2.5B active), built for coding agents |
+| `kilo/xingchen-agi/xing4.0-29b-a4b:free` | 262K | text | ✓ | 29B MoE (4B active) |
 | `kilo/nvidia/nemotron-3.5-lightning:free` | 1M | text | ✓ | fast — the `haiku` alias target |
-| `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | |
+| `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | expires 2026-12-31 |
 | `kilo/nvidia/nemotron-3-super-120b-a12b:free` | 262K | text | ✓ | 120B MoE (12B active) |
-| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent |
+| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent — expires 2026-10-31 |
 | `kilo/cohere/north-mini-code:free` | 256K | text | ✓ | code-specialised |
-| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent |
-| `kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | text, image | ✓ | omni |
+| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent — expires 2026-10-31 |
+| `kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | text, image, audio, video | ✓ | omni |
 | `kilo/openrouter/free` | 200K | text, image | ✓ | OpenRouter free router |
 | `kilo/kilo-auto/free` | 256K | text | ✓ | Kilo's own free router |
-| `kilo/liquid/lfm-2.5-2.6b:free` | 65K | text | ✓ | tiny (2.6B) — rarely worth it |
+| `kilo/liquid/lfm-2.5-2.6b:free` | 65K | text | ✓ | tiny (2.6B, 8K output) — rarely worth it |
 | `kilo/nvidia/nemotron-3.5-content-safety:free` | 128K | text, image | ✗ | classifier, no tool support |
 
 Kilo's free tier rotates as providers end promotions, and the proxy already
 fails over and cools down dead models automatically. To re-check what is free
-right now:
+right now (the ids can end in either `:free` or `-free`):
 
 ```bash
 curl -s https://api.kilo.ai/api/gateway/models \
-  | grep -o '"id":"[^"]*:free"'
+  | grep -o '"id":"[^"]*-free"'
 ```
 
 `ALLOWED_MODELS` is an explicit approval list: with `FREE_MODELS_ONLY=true`
@@ -164,7 +171,7 @@ missing) so every session points at the proxy and the model you want:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
+    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
@@ -180,13 +187,12 @@ Notes:
   `KILO_API_KEY` is set in `.env`). Set `ANTHROPIC_API_KEY` to `""` so Claude
   Code never calls real Anthropic by mistake.
 - `ANTHROPIC_MODEL` names the model Claude Code asks for. Use a
-  provider-qualified ID (e.g. `kilo/stepfun/step-5-preview-free`) to bypass the
+  provider-qualified ID (e.g. `kilo/reflection/beam-free`) to bypass the
   alias table, or a `claude-*` name to let `MODEL_ALIASES` route it.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
-  context size of whichever model you actually run (1M for Step 5 Preview,
-  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Glyph Cluster and Laguna
-  S 2.1).
+  context size of whichever model you actually run (1000000 for Beam,
+  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Laguna S 2.1).
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the proxy's hard cap of `16384`
   on `max_tokens`, so Claude Code budgets against what it can actually get.
   Requests above the cap are clamped, and the clamp is logged.
@@ -227,7 +233,7 @@ that; it documents each one inline.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `DEFAULT_MODEL` | `kilo/stepfun/step-5-preview-free` | Model used when the client omits one |
+| `DEFAULT_MODEL` | `kilo/reflection/beam-free` | Model used when the client omits one |
 | `FALLBACK_MODELS` | built-in list | Tried in order after a temporary upstream failure |
 | `ALLOWED_MODELS` | every `free: true` model | Explicit approval list — anything else is rejected |
 | `FREE_MODELS_ONLY` | `true` | Also reject paid models. Set `false` to allow allowlisted paid models |

@@ -92,7 +92,7 @@ subset.
 | `PROXY_API_KEY` | *(unset)* | **Any non-loopback bind.** `POST /v1/messages` is not loopback-restricted |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
-| `DEFAULT_MODEL` | `kilo/stepfun/step-5-preview-free` | Pick a different primary model |
+| `DEFAULT_MODEL` | `kilo/reflection/beam-free` | Pick a different primary model |
 | `FALLBACK_MODELS` | whole free tier, strongest first (13 models) | Control fallback order after upstream failures |
 | `ALLOWED_MODELS` | every free Kilo model | Narrow the approval list, or opt in a paid model |
 | `FREE_MODELS_ONLY` | `true` | Set `false` to allow paid models that are allowlisted |
@@ -103,7 +103,7 @@ subset.
 | `MAX_QUEUED_REQUESTS` | `20` | Set `0` to fail fast with `429` instead of queueing |
 | `MODEL_COOLDOWN_MS` | `30000` | How long a failing model is skipped |
 | `MAX_BODY_BYTES` | `20971520` | Raise for very large images or file attachments |
-| `MODEL_ALIASES` | haiku → Nemotron Lightning, sonnet/opus → Step 5 Preview | Route bare `claude-*` names yourself |
+| `MODEL_ALIASES` | haiku → Nemotron Lightning, sonnet/opus → Reflection Beam | Route bare `claude-*` names yourself |
 | `SMART_ROUTING` | `true` | Set `false` to disable alias and vision rerouting entirely |
 | `UPSTREAM_CA_FILE` | *(empty)* | Corporate HTTPS inspection (preferred over disabling verification) |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Only if a browser calls the proxy; Claude Code does not |
@@ -126,7 +126,7 @@ subset.
 >
 > ```env
 > QWEN_API_KEY=sk-...
-> ALLOWED_MODELS=kilo/stepfun/step-5-preview-free,qwen/qwen3.7-max,qwen/qwen3-coder-plus
+> ALLOWED_MODELS=kilo/reflection/beam-free,qwen/qwen3.7-max,qwen/qwen3-coder-plus
 > ```
 
 > **Never commit `.env`.** It is gitignored. Only share `.env.example`.
@@ -258,7 +258,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/stepfun/step-5-preview-free",
+    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
@@ -269,7 +269,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
 | Key | Why |
 |-----|-----|
 | `ANTHROPIC_MODEL` | Must be provider-qualified (`kilo/…` or `qwen/…`) or a `claude-*` name the alias table can route |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Step 5 Preview, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Glyph Cluster and Laguna S 2.1 are `262144` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Beam, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Laguna S 2.1 is `262144` |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Matches the proxy's hard `max_tokens` cap of `16384` |
 | `ANTHROPIC_API_KEY` | Set to `""` if present, so Claude Code cannot call real Anthropic |
 
@@ -302,7 +302,7 @@ On Windows the file is `%USERPROFILE%\.claude\settings.json`. Restart with
 | *(empty, default)* | Derive effort from Claude Code's `thinking.budget_tokens` |
 | `low` / `medium` / `high` / `xhigh` / `max` | Force that effort on every turn, whether or not the client asked for thinking |
 
-`high` is a good fit for Step 5 Preview and Nemotron 3.5 Super VL, which both
+`high` is a good fit for Beam and Nemotron 3.5 Super VL, which both
 advertise `reasoning_effort` support directly. Leaving it empty is the
 conservative choice if a model feels slow.
 
@@ -334,7 +334,7 @@ curl http://127.0.0.1:4181/health
 # A real upstream round trip
 curl -s http://127.0.0.1:4181/v1/messages \
   -H 'content-type: application/json' \
-  -d '{"model":"kilo/stepfun/step-5-preview-free","max_tokens":64,
+  -d '{"model":"kilo/reflection/beam-free","max_tokens":64,
        "messages":[{"role":"user","content":"Reply with the single word: OK"}]}'
 
 # Token accounting (local estimate, never touches upstream)
