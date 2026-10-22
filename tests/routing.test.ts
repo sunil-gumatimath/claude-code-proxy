@@ -240,10 +240,10 @@ describe("resolveTarget", () => {
 	});
 
 	test("a custom VISION_MODEL is honoured", () => {
-		const cfg = testConfig({ visionModel: "kilo/stepfun/step-5-preview-free" });
+		const cfg = testConfig({ visionModel: "kilo/dots-studio/dots-3-note-preview:free" });
 		expect(resolveTarget("claude-sonnet-4", imageBody, cfg)).toEqual({
 			provider: "kilo",
-			model: "stepfun/step-5-preview-free",
+			model: "dots-studio/dots-3-note-preview:free",
 		});
 	});
 

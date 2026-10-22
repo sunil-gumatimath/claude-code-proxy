@@ -91,8 +91,8 @@ describe("qualifyModel", () => {
 	});
 
 	test("an empty prefix leaves the model untouched", () => {
-		expect(qualifyModel(kilo("stepfun/step-5-preview-free"), testConfig())).toBe(
-			"stepfun/step-5-preview-free",
+		expect(qualifyModel(kilo("reflection/beam-free"), testConfig())).toBe(
+			"reflection/beam-free",
 		);
 	});
 });

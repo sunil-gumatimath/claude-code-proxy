@@ -19,14 +19,14 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		fallbackModels: [
 			"kilo/poolside/laguna-s-2.1:free",
 			"kilo/cohere/north-mini-code:free",
-			"kilo/stepfun/step-5-preview-free",
+			"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 		],
 		allowedModels: [
 			"kilo/nvidia/nemotron-3.5-super-vl:free",
 			"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 			"kilo/poolside/laguna-s-2.1:free",
 			"kilo/cohere/north-mini-code:free",
-			"kilo/stepfun/step-5-preview-free",
+			"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 		],
 		freeModelsOnly: true,
 		visionModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
