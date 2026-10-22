@@ -117,14 +117,16 @@ export interface Config {
 
 const DEFAULT_FALLBACK_MODELS = [
 	"kilo/nvidia/nemotron-3.5-super-vl:free",
-	"kilo/stepfun/step-5-preview-free",
+	"kilo/reflection/beam-free",
+	"kilo/stealth/glyph-cluster",
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-	"kilo/thinkingmachines/inkling-small:free",
+	"kilo/recursive/flint-v1.0:free",
 	"kilo/dots-studio/dots-3-note-preview:free",
 	"kilo/nvidia/nemotron-3.5-lightning:free",
 	"kilo/nvidia/nemotron-3-super-120b-a12b:free",
 	"kilo/poolside/laguna-s-2.1:free",
 	"kilo/cohere/north-mini-code:free",
+	"kilo/xingchen-agi/xing4.0-29b-a4b:free",
 	"kilo/poolside/laguna-xs-2.1:free",
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 	"kilo/openrouter/free",
@@ -167,7 +169,7 @@ export function loadConfig(env: Env = Bun.env): Config {
 		// Preserve Claude Code's requested model name unless the gateway requires a prefix.
 		modelPrefix: envStr(env, "MODEL_PREFIX", ""),
 		defaultModel: canonicalEntry(
-			envStr(env, "DEFAULT_MODEL", "kilo/stepfun/step-5-preview-free"),
+			envStr(env, "DEFAULT_MODEL", "kilo/reflection/beam-free"),
 		),
 		fallbackModels: envList(env, "FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS),
 		allowedModels: envList(env, "ALLOWED_MODELS", defaultAllowedModels()),
@@ -177,7 +179,7 @@ export function loadConfig(env: Env = Bun.env): Config {
 		),
 		modelAliases: parseAliases(
 			env.MODEL_ALIASES ??
-				"*haiku*=kilo/nvidia/nemotron-3.5-lightning:free,*sonnet*=kilo/stepfun/step-5-preview-free,*opus*=kilo/stepfun/step-5-preview-free",
+				"*haiku*=kilo/nvidia/nemotron-3.5-lightning:free,*sonnet*=kilo/reflection/beam-free,*opus*=kilo/reflection/beam-free",
 		),
 		reasoningEffort: parseReasoningEffort(env.REASONING_EFFORT ?? ""),
 		smartRouting: envBool(env, "SMART_ROUTING", true),
