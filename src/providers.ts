@@ -54,12 +54,15 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
- * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-15, plus a live
- * chat/completions tool-use smoke test.
+ * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-22.
  *
  * `free: true` means the upstream charges $0 today. The tier rotates as
- * providers end promotions, so re-check the catalog when a model starts
- * returning 404 (retired) or sustained 429 (capacity withdrawn).
+ * providers end promotions — `stepfun/step-5-preview-free` and
+ * `thinkingmachines/inkling-small:free` were retired between the previous
+ * check and this one — so re-check the catalog when a model starts returning
+ * 404 (retired) or sustained 429 (capacity withdrawn). Every current free
+ * model trains on your prompts (isFree + mayTrainOnYourPrompts on the
+ * gateway), which is the price of the $0 tier.
  *
  * This table is the single source of truth for the free catalog: the default
  * ALLOWED_MODELS list in config.ts is derived from it, so a model cannot be
@@ -67,17 +70,21 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
  */
 const CAPABILITIES: Record<string, ModelCapabilities> = {
 	// Routers — no fixed underlying model, so behaviour can change server-side.
-	"kilo/kilo-auto/free": { tools: true, vision: false, free: true }, // 256K, text only
+	"kilo/kilo-auto/free": { tools: true, vision: false, free: true }, // 256K, text only, 32K out
 	"kilo/openrouter/free": { tools: true, vision: true, free: true }, // 200K, text+image
 
 	// NVIDIA Nemotron — the strongest free tier for long-context agentic work.
+	"kilo/nvidia/nemotron-3.5-super-vl:free": {
+		tools: true,
+		vision: true,
+		free: true,
+	}, // 1M, text+image+video, 131K out
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free": {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 1M, text
-	"kilo/nvidia/nemotron-3.5-super-vl:free": { tools: true, vision: true, free: true }, // 1M, text+image+video
-	"kilo/nvidia/nemotron-3.5-lightning:free": { tools: true, vision: false, free: true }, // 1M
+	}, // 1M, text, 64K out
+	"kilo/nvidia/nemotron-3.5-lightning:free": { tools: true, vision: false, free: true }, // 1M, text, 64K out
 	"kilo/nvidia/nemotron-3.5-content-safety:free": {
 		tools: false,
 		vision: true,
@@ -87,21 +94,36 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 262K
+	}, // 262K, text, 236K out
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
 		tools: true,
 		vision: true,
 		free: true,
-	}, // 256K, omni
+	}, // 256K, omni (text+image+audio+video), 64K out
 
-	"kilo/stealth/glyph-cluster": { tools: true, vision: false, free: true }, // 256K
-	"kilo/thinkingmachines/inkling-small:free": { tools: true, vision: true, free: true }, // 1M, text+image+audio
-	"kilo/stepfun/step-5-preview-free": { tools: true, vision: true, free: true }, // 1M, text+image
-	"kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true, free: true }, // 512K
-	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K
-	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K
-	"kilo/cohere/north-mini-code:free": { tools: true, vision: false, free: true }, // 256K, code-specialised
-	"kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false, free: true }, // 65K, too small for real sessions
+	// Reflection Beam — reasoning model for coding and agentic workflows; the
+	// new default primary now that Step 5 Preview's free variant is retired.
+	"kilo/reflection/beam-free": {
+		tools: true,
+		vision: false,
+		free: true,
+	}, // 1M, text, function calling + structured outputs, 131K out
+	"kilo/stealth/glyph-cluster": { tools: true, vision: false, free: true }, // 256K, text, 256K out
+	"kilo/recursive/flint-v1.0:free": {
+		tools: true,
+		vision: false,
+		free: true,
+	}, // 262K, text, 40B MoE (2.5B active) built for coding agents, 236K out
+	"kilo/xingchen-agi/xing4.0-29b-a4b:free": {
+		tools: true,
+		vision: false,
+		free: true,
+	}, // 262K, text, 29B MoE (4B active), 236K out
+	"kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true, free: true }, // 512K, text+image, expires 2026-12-31
+	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, expires 2026-10-31
+	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, expires 2026-10-31
+	"kilo/cohere/north-mini-code:free": { tools: true, vision: false, free: true }, // 256K, text, 64K out, code-specialised
+	"kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false, free: true }, // 65K, text, 8K out — too small for real sessions
 
 	// ── Qwen / DashScope (Alibaba Cloud Model Studio) ───────────────────────
 	// No free model tier: these bill per token once the promotional quota is
