@@ -54,7 +54,7 @@ Point Claude Code at it — for a persistent setup, put this in
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
     "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
-    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384"
   }
 }
@@ -88,7 +88,7 @@ one small /v1/messages request succeeds and report anything I still need to do.
 
 ```env
 DEFAULT_MODEL=kilo/reflection/beam-free
-REASONING_EFFORT=high
+REASONING_EFFORT=medium
 ```
 
 Beam 1.0 (free) is the default primary: Reflection's reasoning model for coding
@@ -118,7 +118,7 @@ effort from Claude Code's thinking budget instead.
 
 ### Current free models
 
-Verified against the live Kilo catalog on **2026-10-22** — every one bills `$0`
+Verified against the live Kilo catalog on **2026-10-24** - every one bills `$0`
 today. All support tool calling except the content-safety classifier; `✗` marks
 that one. Since the previous check (2026-10-15), `stepfun/step-5-preview-free`
 and `thinkingmachines/inkling-small:free` were retired (only paid variants
@@ -191,7 +191,7 @@ Notes:
   alias table, or a `claude-*` name to let `MODEL_ALIASES` route it.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
-  context size of whichever model you actually run (1000000 for Beam,
+  context size of whichever model you actually run (1048576 for Beam,
   Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Laguna S 2.1).
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the proxy's hard cap of `16384`
   on `max_tokens`, so Claude Code budgets against what it can actually get.
