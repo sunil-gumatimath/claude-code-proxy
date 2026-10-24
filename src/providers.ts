@@ -54,7 +54,7 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
- * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-22.
+ * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-24.
  *
  * `free: true` means the upstream charges $0 today. The tier rotates as
  * providers end promotions — `stepfun/step-5-preview-free` and
