@@ -88,6 +88,45 @@ describe("requestNeedsVision", () => {
 		expect(requestNeedsVision({})).toBe(false);
 		expect(requestNeedsVision({ messages: [] })).toBe(false);
 	});
+
+	test("detects an image nested inside a tool_result", () => {
+		// Screenshots and image reads arrive as tool output. Routing them to a
+		// text-only model either 400s or silently loses the picture.
+		expect(
+			requestNeedsVision({
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "call_1",
+								content: [
+									{
+										type: "image",
+										source: { type: "base64", media_type: "image/png", data: "abc" },
+									},
+								],
+							},
+						],
+					},
+				],
+			}),
+		).toBe(true);
+	});
+
+	test("text-only tool output is not vision", () => {
+		expect(
+			requestNeedsVision({
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: "call_1", content: "exit 0" }],
+					},
+				],
+			}),
+		).toBe(false);
+	});
 });
 
 // ── isTargetAllowed (the cost gate) ──────────────────────────────────────────

@@ -26,7 +26,12 @@ interface AnthropicToolUseBlock {
 interface AnthropicToolResultBlock {
 	type: "tool_result";
 	tool_use_id: string;
-	content?: string | AnthropicTextBlock[];
+	/**
+	 * Tool output may carry image blocks as well as text (a screenshot from a
+	 * browser tool, an image returned by Read). They are kept in the type so the
+	 * translator can forward them instead of silently dropping them.
+	 */
+	content?: string | AnthropicContentBlock[];
 	is_error?: boolean;
 }
 

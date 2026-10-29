@@ -278,3 +278,197 @@ describe("handleStream", () => {
 		expect(state.cleaned).toBe(1);
 	});
 });
+
+// ── Failover before the first byte ───────────────────────────────────────────
+
+const encoder = new TextEncoder();
+
+/** An attempt whose body delivers `text` and then closes normally. */
+function goodAttempt(text: string, onDetach?: () => void) {
+	return {
+		response: new Response(
+			new ReadableStream<Uint8Array>({
+				start(c) {
+					c.enqueue(
+						encoder.encode(
+							`data: {"choices":[{"delta":{"content":"${text}"}}]}\n\n` +
+								'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+								"data: [DONE]\n\n",
+						),
+					);
+					c.close();
+				},
+			}),
+			{ status: 200 },
+		),
+		controller: new AbortController(),
+		detach: () => onDetach?.(),
+	};
+}
+
+/** An attempt whose body fails before emitting anything. */
+function brokenAttempt(message = "upstream reset") {
+	return {
+		response: new Response(
+			new ReadableStream<Uint8Array>({
+				start(c) {
+					c.error(new Error(message));
+				},
+			}),
+			{ status: 200 },
+		),
+		controller: new AbortController(),
+		detach: () => {},
+	};
+}
+
+describe("handleStream — failover before first byte", () => {
+	test("an attempt that fails before any content is replaced transparently", async () => {
+		let retries = 0;
+		let firstDetached = 0;
+		let cleanupCount = 0;
+		const failures: string[] = [];
+
+		const res = handleStream(brokenAttempt().response, {
+			model: "m",
+			requestId: "r",
+			startTime: performance.now(),
+			upstreamController: new AbortController(),
+			cleanup: () => {
+				cleanupCount++;
+			},
+			detach: () => {
+				firstDetached++;
+			},
+			onUpstreamFailure: (reason) => failures.push(reason),
+			retry: async () => {
+				retries++;
+				return goodAttempt("second");
+			},
+		});
+
+		const out = await drain(res);
+		expect(retries).toBe(1);
+		expect(out).toContain("second");
+		expect(out).toContain("message_stop");
+		expect(out).not.toContain("event: error");
+		// Exactly one message_start: a retried attempt must not open a second one.
+		expect(out.split("message_start").length - 1).toBe(2); // event: + data:
+		expect(failures).toHaveLength(1);
+		expect(firstDetached).toBe(1);
+		expect(cleanupCount).toBe(1);
+	});
+
+	test("no retry once content has reached the client", async () => {
+		let retries = 0;
+		// pull-based so the content chunk is actually delivered before the error:
+		// controller.error() immediately after enqueue discards the queued chunk.
+		let step = 0;
+		const failing = new Response(
+			new ReadableStream<Uint8Array>({
+				pull(c) {
+					if (step++ === 0) {
+						c.enqueue(
+							encoder.encode('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'),
+						);
+					} else {
+						c.error(new Error("reset mid-stream"));
+					}
+				},
+			}),
+			{ status: 200 },
+		);
+
+		const res = handleStream(failing, {
+			model: "m",
+			requestId: "r",
+			startTime: performance.now(),
+			upstreamController: new AbortController(),
+			cleanup: () => {},
+			retry: async () => {
+				retries++;
+				return goodAttempt("second");
+			},
+		});
+
+		const out = await drain(res);
+		expect(retries).toBe(0);
+		expect(out).toContain("partial");
+		expect(out).toContain("event: error");
+		expect(out).not.toContain("second");
+	});
+
+	test("a stall before the first byte also fails over", async () => {
+		// Headers arrive, the body never produces anything. The idle deadline fires
+		// and the next candidate should be tried rather than failing the turn.
+		const silent = new Response(
+			new ReadableStream<Uint8Array>({
+				start() {
+					/* never enqueues, never closes */
+				},
+			}),
+			{ status: 200 },
+		);
+
+		const res = handleStream(silent, {
+			model: "m",
+			requestId: "r",
+			startTime: performance.now(),
+			upstreamController: new AbortController(),
+			cleanup: () => {},
+			idleTimeoutMs: 60,
+			retry: async () => goodAttempt("rescued"),
+		});
+
+		const out = await Promise.race([drain(res), Bun.sleep(3000)]);
+		expect(out).toContain("rescued");
+		expect(out).not.toContain("event: error");
+	});
+
+	test("a stall after content is reported and does not retry", async () => {
+		let retries = 0;
+		let failures = 0;
+		const stalled = stallingResponse();
+		const res = handleStream(stalled.response, {
+			model: "m",
+			requestId: "r",
+			startTime: performance.now(),
+			upstreamController: new AbortController(),
+			cleanup: () => {},
+			idleTimeoutMs: 60,
+			onUpstreamFailure: () => {
+				failures++;
+			},
+			retry: async () => {
+				retries++;
+				return goodAttempt("second");
+			},
+		});
+
+		const out = await Promise.race([drain(res), Bun.sleep(3000)]);
+		stalled.release();
+		expect(out).toContain("event: error");
+		expect(out).toContain("stalled");
+		expect(retries).toBe(0);
+		// A stalled model is as unhealthy as a bad status, so it must be cooled.
+		expect(failures).toBe(1);
+	});
+});
+
+/** Emits one chunk, then never ends (released by the caller). */
+function stallingResponse() {
+	let release!: () => void;
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const response = new Response(
+		new ReadableStream<Uint8Array>({
+			start(c) {
+				c.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'));
+				void gate;
+			},
+		}),
+		{ status: 200 },
+	);
+	return { response, release };
+}

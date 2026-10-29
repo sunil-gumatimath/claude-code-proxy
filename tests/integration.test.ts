@@ -361,6 +361,62 @@ describe("handleMessages — streaming", () => {
 		expect(out.split("message_stop").length - 1).toBe(2); // once in `event:`, once in `data:`
 		expect(out.trimEnd().endsWith('data: {"type":"message_stop"}')).toBe(true);
 	});
+
+	test("message_start reports an estimated prompt size, never zero", async () => {
+		// Claude Code reads context usage from message_start, not message_delta.
+		stubUpstream(() =>
+			sseResponse([
+				'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+				"data: [DONE]\n\n",
+			]),
+		);
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
+		const out = await collectStream(res);
+		const match = out.match(/"input_tokens":(\d+)/);
+		expect(match).not.toBeNull();
+		expect(Number(match?.[1])).toBeGreaterThan(0);
+	});
+
+	test("a candidate that fails before its first byte is replaced silently", async () => {
+		// Headers arrived, then the body died. Before this, the turn was lost;
+		// now the next candidate answers and the client sees one clean stream.
+		let calls = 0;
+		const models: string[] = [];
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			models.push(JSON.parse(init.body).model);
+			calls++;
+			if (calls === 1) {
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(c) {
+							c.error(new Error("upstream reset"));
+						},
+					}),
+					{ status: 200 },
+				);
+			}
+			return sseResponse([
+				'data: {"choices":[{"delta":{"content":"rescued"}}]}\n\n',
+				'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+				"data: [DONE]\n\n",
+			]);
+		}) as unknown as typeof fetch;
+
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
+		const out = await collectStream(res);
+		expect(out).toContain("rescued");
+		expect(out).not.toContain("event: error");
+		expect(models).toHaveLength(2);
+		expect(models[0]).not.toBe(models[1]);
+		// The abandoned attempt must not leak a second message_start.
+		expect(out.split("message_start").length - 1).toBe(2);
+	});
 });
 
 // ── Streaming stall ──────────────────────────────────────────────────────────
@@ -392,6 +448,35 @@ describe("handleMessages — stream idle deadline", () => {
 		stubUpstream(() => okBody("recovered", "chatcmpl-after"));
 		const after = await handleMessages(messagesRequest(simpleBody()), cfg);
 		expect(after.status).toBe(200);
+	});
+
+	test("a stalled stream cools the model so the next turn leads elsewhere", async () => {
+		// The sync path always cooled the model on a stalled body; the streaming
+		// path never did, so a flaky model was retried first on every turn.
+		const cfg = testConfig({
+			upstreamTimeoutMs: 100,
+			fallbackModels: ["kilo/cohere/north-mini-code:free"],
+		});
+		const stalling = stallingSseResponse();
+		globalThis.fetch = mock(async () => stalling.response) as unknown as typeof fetch;
+
+		const stalled = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			cfg,
+		);
+		const out = await Promise.race([collectStream(stalled), Bun.sleep(3000)]);
+		stalling.release();
+		expect(out).toContain("event: error");
+
+		const models: string[] = [];
+		globalThis.fetch = mock(async (_url: any, init: any) => {
+			models.push(JSON.parse(init.body).model);
+			return okBody("ok");
+		}) as unknown as typeof fetch;
+		const next = await handleMessages(messagesRequest(simpleBody()), cfg);
+		expect(next.status).toBe(200);
+		// The primary is cooling, so the fallback leads.
+		expect(models[0]).toBe("cohere/north-mini-code:free");
 	});
 });
 

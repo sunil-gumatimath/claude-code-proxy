@@ -9,13 +9,13 @@ import { colors, debug, error, log, redact } from "../log";
 import { displayTarget, qualifyModel } from "../providers";
 import { buildCandidateTargets, isTargetAllowed, resolveTarget } from "../routing";
 import { beginRequest, getRuntime, recordUpstreamError } from "../runtime";
-import { translateRequest, translateResponse, uid } from "../translate";
+import { estimateTokens, translateRequest, translateResponse, uid } from "../translate";
 import type { AnthropicMessagesRequest, OpenAIChatResponse } from "../types";
 import { BODY_ABORTED, BODY_TOO_LARGE, isBodyError, readBodyLimited } from "./body";
 import { handleStream } from "./stream";
 import { callUpstream, isAbortError } from "./upstream";
 
-const { cyan, green, bold, dim } = colors;
+const { cyan, green, bold, dim, yellow } = colors;
 
 /** Hard ceiling on max_tokens, independent of what the client asks for. */
 const MAX_OUTPUT_TOKENS = 16384;
@@ -121,15 +121,56 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 			const streamFinish = finishRequest;
 			releaseSlot = undefined;
 			finishRequest = undefined;
+
+			// `callUpstream` already fell back across candidates until headers
+			// arrived. A failure *after* that point used to be terminal for the
+			// turn; the pump can now hand it to the next candidate as long as no
+			// byte has reached the client yet.
+			const tried = new Set<string>([displayTarget(target)]);
+			let activeTarget = target;
+
 			return handleStream(upstream, {
 				model: originalModel,
 				requestId,
 				startTime,
 				upstreamController: controller,
+				// The slot and the request metric are owned by the pump; the abort
+				// listener moves with each attempt, so detaching is per-attempt.
 				cleanup: () => {
-					detach();
 					streamRelease?.();
 					streamFinish?.();
+				},
+				detach,
+				inputTokens: estimateTokens(translated),
+				clientSignal: req.signal,
+				onUpstreamFailure: () => {
+					// A body that stalls or errors is as unhealthy as a bad status.
+					// Without this the model was never cooled and every turn paid for
+					// it first.
+					runtime.cooldowns.fail(displayTarget(activeTarget));
+					recordUpstreamError();
+				},
+				retry: async () => {
+					const remaining = targets.filter(
+						(candidate) => !tried.has(displayTarget(candidate)),
+					);
+					if (!remaining.length) return undefined;
+					for (const candidate of remaining) tried.add(displayTarget(candidate));
+					log(
+						`${yellow("↳")} stream failed before first byte; trying next candidate ${dim(requestId)}`,
+					);
+					const next = await callUpstream({
+						config,
+						signal: req.signal,
+						targets: remaining,
+						body: translated,
+						requestApiKey,
+						requestedProvider: requestedTarget.provider,
+						requestId,
+					});
+					if (!next.ok) return undefined;
+					activeTarget = next.target;
+					return next;
 				},
 				maxBufferBytes: config.maxBodyBytes,
 				idleTimeoutMs: config.upstreamTimeoutMs,

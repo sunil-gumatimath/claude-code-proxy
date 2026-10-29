@@ -216,26 +216,9 @@ function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] 
 	for (const block of blocks) {
 		if (block.type === "text" && "text" in block) {
 			contentParts.push({ type: "text", text: block.text });
-		} else if (block.type === "image" && "source" in block) {
-			const source = block.source as {
-				type?: string;
-				media_type?: string;
-				data?: string;
-				url?: string;
-			};
-			if (source?.type === "base64" && source.media_type && source.data) {
-				contentParts.push({
-					type: "image_url",
-					image_url: {
-						url: `data:${source.media_type};base64,${source.data}`,
-					},
-				});
-			} else if (source?.type === "url" && source.url) {
-				contentParts.push({
-					type: "image_url",
-					image_url: { url: source.url },
-				});
-			}
+		} else if (block.type === "image") {
+			const part = toImagePart(block as { source?: unknown });
+			if (part) contentParts.push(part);
 		} else if (block.type === "document" && "source" in block) {
 			const source = block.source as {
 				type?: string;
@@ -267,24 +250,43 @@ function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] 
 			}
 
 			let toolContent = "";
+			const toolImages: unknown[] = [];
 			const content = "content" in block ? block.content : undefined;
 			if (typeof content === "string") {
 				toolContent = content;
 			} else if (Array.isArray(content)) {
-				toolContent = content
-					.filter((b) => b && typeof b === "object" && "type" in b && b.type === "text")
-					.map((b) => ("text" in b ? String(b.text) : ""))
-					.join("\n");
+				const texts: string[] = [];
+				for (const part of content) {
+					if (!part || typeof part !== "object") continue;
+					if (part.type === "text" && "text" in part) {
+						texts.push(String(part.text));
+					} else if (part.type === "image") {
+						const image = toImagePart(part as { source?: unknown });
+						if (image) toolImages.push(image);
+					}
+				}
+				toolContent = texts.join("\n");
 			}
 
-			// Note: Anthropic's is_error has no OpenAI equivalent; the field is
-			// deliberately NOT forwarded — non-standard keys can 400 strict
-			// OpenAI-compatible gateways. The error text itself is in content.
+			// Anthropic's is_error has no OpenAI equivalent and non-standard keys
+			// can 400 strict gateways, so the failure is stated in-band. Handing
+			// back only the error text makes a failed tool look like a successful
+			// result that happened to contain a message.
+			if ("is_error" in block && block.is_error === true) {
+				toolContent = toolContent ? `[tool error] ${toolContent}` : "[tool error]";
+			}
+
+			// Note: the error text itself is already in content.
 			result.push({
 				role: "tool",
 				tool_call_id: String(block.tool_use_id),
 				content: toolContent || "",
 			});
+
+			// An OpenAI tool message is text-only, so an image a tool returned
+			// cannot ride along with it. Emit it as the immediately following user
+			// message; silently dropping it leaves the model blind to the output.
+			if (toolImages.length) result.push({ role: "user", content: toolImages });
 		}
 	}
 
@@ -293,6 +295,23 @@ function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] 
 	}
 
 	return result.length ? result : [{ role: "user", content: "" }];
+}
+
+/** Convert an Anthropic image source into an OpenAI image_url content part. */
+function toImagePart(block: { source?: unknown }): unknown | undefined {
+	const source = block.source as
+		| { type?: string; media_type?: string; data?: string; url?: string }
+		| undefined;
+	if (source?.type === "base64" && source.media_type && source.data) {
+		return {
+			type: "image_url",
+			image_url: { url: `data:${source.media_type};base64,${source.data}` },
+		};
+	}
+	if (source?.type === "url" && source.url) {
+		return { type: "image_url", image_url: { url: source.url } };
+	}
+	return undefined;
 }
 
 function simplifyContent(parts: unknown[]): string | unknown[] {
@@ -415,14 +434,30 @@ export class StreamTranslator {
 	private outputTokens = 0;
 	private finished = false;
 	private pendingFinishReason: string | undefined;
+	/** The upstream answered 200 with an error object inside the stream. */
+	private errorFrame = false;
 
-	constructor(model: string) {
+	/**
+	 * `estimatedInputTokens` seeds message_start. The upstream's real prompt
+	 * usage only arrives in the final chunk, long after message_start has been
+	 * sent, and Anthropic clients (Claude Code in particular) read the context
+	 * size from that event. Reporting 0 there makes their context meter and
+	 * auto-compact behaviour wrong, so a local estimate is better than a
+	 * confidently incorrect zero.
+	 */
+	constructor(model: string, estimatedInputTokens = 0) {
 		this.msgId = `msg_${uid()}`;
 		this.model = model;
+		this.inputTokens = estimatedInputTokens;
 	}
 
 	get isFinished(): boolean {
 		return this.finished;
+	}
+
+	/** Whether the last processed chunk was an error object, not a completion. */
+	get errored(): boolean {
+		return this.errorFrame;
 	}
 
 	/**
@@ -460,6 +495,7 @@ export class StreamTranslator {
 		if (maybeError) {
 			const errMsg = extractErrorMessage(maybeError, "Upstream stream error");
 			this.finished = true;
+			this.errorFrame = true;
 			return [anthropicErrorSse("api_error", truncate(errMsg, 2000))];
 		}
 
@@ -477,7 +513,7 @@ export class StreamTranslator {
 						model: this.model,
 						stop_reason: null,
 						stop_sequence: null,
-						usage: { input_tokens: 0, output_tokens: 0 },
+						usage: { input_tokens: this.inputTokens, output_tokens: 0 },
 					},
 				}),
 				sse("ping", { type: "ping" }),
@@ -665,7 +701,7 @@ export class StreamTranslator {
 						model: this.model,
 						stop_reason: null,
 						stop_sequence: null,
-						usage: { input_tokens: 0, output_tokens: 0 },
+						usage: { input_tokens: this.inputTokens, output_tokens: 0 },
 					},
 				}),
 				...this.emitFinish(reason),
@@ -802,6 +838,43 @@ function sse(event: string, data: unknown): string {
  */
 function thinkingSignature(thinking: string): string {
 	return createHash("sha256").update(thinking, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * Cheap prompt-size estimate (chars/4), matching the heuristic `count_tokens`
+ * uses. Measured against the translated upstream request so it covers what is
+ * actually sent, tool schemas included — it is an approximation for the
+ * client's context meter, not a billing figure.
+ *
+ * An encoded image or document is charged a flat budget instead of its payload
+ * length: one screenshot is a few thousand characters of base64 per pixel and
+ * counting them verbatim would report hundreds of thousands of tokens for a
+ * single image, making the client compact far too early.
+ */
+export function estimateTokens(value: unknown): number {
+	return Math.max(1, Math.ceil(countEstimateChars(value) / 4));
+}
+
+/** Characters an attachment is charged, roughly 1500 tokens. */
+const ATTACHMENT_TOKEN_BUDGET = 6000;
+
+function countEstimateChars(value: unknown): number {
+	if (typeof value === "string") return value.length;
+	if (Array.isArray(value)) {
+		let total = 0;
+		for (const item of value) total += countEstimateChars(item);
+		return total;
+	}
+	if (!value || typeof value !== "object") return 0;
+
+	const type = (value as { type?: unknown }).type;
+	if (type === "image_url" || type === "file") return ATTACHMENT_TOKEN_BUDGET;
+
+	let total = 0;
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		total += key.length + countEstimateChars(item);
+	}
+	return total;
 }
 
 export function uid(): string {

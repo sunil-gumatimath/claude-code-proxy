@@ -100,15 +100,16 @@ $0 tier. `VISION_MODEL` points at **Nemotron 3.5 Super VL** (1M context, native
 image *and video*), so image/video input reroutes to a purpose-built
 multimodal model.
 
-`FALLBACK_MODELS` walks the whole free tier, strongest first — Nemotron 3.5
-Super VL (vision+video), a second Beam copy (as backup when called by name),
-the **Glyph Cluster** stealth frontier model (256K output tokens), Nemotron
-Ultra (1M, 550B MoE), Flint v1.0 (40B MoE built for coding agents), Dots 3 Note
-(vision, expires 2026-12-31), Nemotron Lightning (fast), Nemotron Super 120B,
-Laguna S 2.1 (coding, expires 2026-10-31), North Mini Code (code-specialised),
-Xing4.0 (29B MoE), Laguna XS 2.1, Nemotron Nano Omni (omni), OpenRouter Free,
-and finally `kilo/kilo-auto/free` — Kilo's own free router, kept last because it
-resolves server-side to a smaller model for free accounts.
+`FALLBACK_MODELS` walks the free tier, strongest first — Nemotron 3.5 Super VL
+(vision+video, 1M), Beam (reasoning/coding, 1M), the **Glyph Cluster** stealth
+frontier model (256K output tokens), Nemotron Ultra (1M, 550B MoE), Flint v1.0
+(40B MoE built for coding agents), North Mini Code (code-specialised), Dots 3
+Note (vision, expires 2026-12-31), Nemotron Lightning (fast), Xing4.0 (29B MoE),
+Nemotron Nano Omni (omni), OpenRouter Free, and finally `kilo/kilo-auto/free` —
+Kilo's own free router, kept last because it resolves server-side to a smaller
+model for free accounts. Every entry supports tool calling, and the head of the
+list has the biggest context and output budgets because Claude Code sends large
+prompts and large file rewrites.
 
 `MODEL_ALIASES` tiers the bare `claude-*` names: Opus and Sonnet both route to
 Beam, Haiku to the fast Nemotron 3.5 Lightning.
@@ -118,11 +119,12 @@ effort from Claude Code's thinking budget instead.
 
 ### Current free models
 
-Verified against the live Kilo catalog on **2026-10-24** - every one bills `$0`
+Verified against the live Kilo catalog on **2026-10-29** — every one bills `$0`
 today. All support tool calling except the content-safety classifier; `✗` marks
-that one. Since the previous check (2026-10-15), `stepfun/step-5-preview-free`
-and `thinkingmachines/inkling-small:free` were retired (only paid variants
-remain) and Beam, Flint, and Xing4.0 joined.
+that one. Since the previous check (2026-10-24), `nemotron-3-super-120b-a12b:free`
+was retired (it left the catalog on 2026-10-27) and both Laguna models were
+scheduled to expire on 2026-10-31, so none of the three is in the default
+`FALLBACK_MODELS` chain.
 
 | Model | Context | Input | Tools | Role |
 | --- | --- | --- | --- | --- |
@@ -134,10 +136,9 @@ remain) and Beam, Flint, and Xing4.0 joined.
 | `kilo/xingchen-agi/xing4.0-29b-a4b:free` | 262K | text | ✓ | 29B MoE (4B active) |
 | `kilo/nvidia/nemotron-3.5-lightning:free` | 1M | text | ✓ | fast — the `haiku` alias target |
 | `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | expires 2026-12-31 |
-| `kilo/nvidia/nemotron-3-super-120b-a12b:free` | 262K | text | ✓ | 120B MoE (12B active) |
-| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent — expires 2026-10-31 |
 | `kilo/cohere/north-mini-code:free` | 256K | text | ✓ | code-specialised |
-| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent — expires 2026-10-31 |
+| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent — expires 2026-10-31 — **not in the default chain** |
+| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent — expires 2026-10-31 — **not in the default chain** |
 | `kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | text, image, audio, video | ✓ | omni |
 | `kilo/openrouter/free` | 200K | text, image | ✓ | OpenRouter free router |
 | `kilo/kilo-auto/free` | 256K | text | ✓ | Kilo's own free router |
@@ -192,7 +193,8 @@ Notes:
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
   context size of whichever model you actually run (1048576 for Beam,
-  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Laguna S 2.1).
+  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Flint v1.0 and Xing4.0;
+  256000 for Glyph Cluster).
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the proxy's hard cap of `16384`
   on `max_tokens`, so Claude Code budgets against what it can actually get.
   Requests above the cap are clamped, and the clamp is logged.
@@ -338,6 +340,15 @@ upstream, releases the concurrency slot, and puts the model in cooldown. The
 request body is bounded the same way, by `MAX_BODY_BYTES` *and* a per-chunk read
 deadline, so a slow-drip upload cannot hold a connection open either.
 
+**A stream that dies before its first byte is retried transparently.** The
+fallback chain is not abandoned once headers arrive. If the body resets, stalls,
+or carries an error frame before anything has been written to the client, the
+next candidate is tried and the client sees one clean stream — no `error` event,
+no second `message_start`. Once a byte *has* been emitted the response is
+committed, so a later failure is reported rather than retried, which would splice
+two messages together. A stall is also treated as a health signal: the model is
+cooled exactly as a `5xx` would be, so the next turn does not lead with it again.
+
 **Failures walk the fallback chain; bad requests do not.** `404`, `408`, `429`,
 `403`, `402`, and `5xx` are transient or model-specific, so the next candidate is
 tried. A `400` is the client's fault and would fail identically everywhere, so it
@@ -369,7 +380,7 @@ reject on the next turn.
 
 ```bash
 curl http://127.0.0.1:4181/health
-bun test          # 250 unit + integration tests
+bun test          # 264 unit + integration tests
 bun run typecheck # tsc --noEmit
 bun run dev       # --watch reload
 bun run check     # format + lint + typecheck + test, as CI runs it

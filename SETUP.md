@@ -93,7 +93,7 @@ subset.
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
 | `DEFAULT_MODEL` | `kilo/reflection/beam-free` | Pick a different primary model |
-| `FALLBACK_MODELS` | whole free tier, strongest first (13 models) | Control fallback order after upstream failures |
+| `FALLBACK_MODELS` | whole free tier, strongest first (12 models) | Control fallback order after upstream failures |
 | `ALLOWED_MODELS` | every free Kilo model | Narrow the approval list, or opt in a paid model |
 | `FREE_MODELS_ONLY` | `true` | Set `false` to allow paid models that are allowlisted |
 | `VISION_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Your primary cannot read images — or you want the video-capable model for image turns |
@@ -269,7 +269,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
 | Key | Why |
 |-----|-----|
 | `ANTHROPIC_MODEL` | Must be provider-qualified (`kilo/…` or `qwen/…`) or a `claude-*` name the alias table can route |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Beam, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Laguna S 2.1 is `262144` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Beam, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Flint v1.0 and Xing4.0 are `262144` |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Matches the proxy's hard `max_tokens` cap of `16384` |
 | `ANTHROPIC_API_KEY` | Set to `""` if present, so Claude Code cannot call real Anthropic |
 

@@ -54,15 +54,15 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
- * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-24.
+ * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-29.
  *
  * `free: true` means the upstream charges $0 today. The tier rotates as
- * providers end promotions — `stepfun/step-5-preview-free` and
- * `thinkingmachines/inkling-small:free` were retired between the previous
- * check and this one — so re-check the catalog when a model starts returning
- * 404 (retired) or sustained 429 (capacity withdrawn). Every current free
- * model trains on your prompts (isFree + mayTrainOnYourPrompts on the
- * gateway), which is the price of the $0 tier.
+ * providers end promotions — `stepfun/step-5-preview-free`,
+ * `thinkingmachines/inkling-small:free`, and `nemotron-3-super-120b-a12b:free`
+ * were all retired between checks — so re-check the catalog when a model
+ * starts returning 404 (retired) or sustained 429 (capacity withdrawn). Every
+ * current free model trains on your prompts (isFree + mayTrainOnYourPrompts on
+ * the gateway), which is the price of the $0 tier.
  *
  * This table is the single source of truth for the free catalog: the default
  * ALLOWED_MODELS list in config.ts is derived from it, so a model cannot be
@@ -90,11 +90,6 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		vision: true,
 		free: true,
 	}, // 128K, text+image classifier — no tool support
-	"kilo/nvidia/nemotron-3-super-120b-a12b:free": {
-		tools: true,
-		vision: false,
-		free: true,
-	}, // 262K, text, 236K out
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
 		tools: true,
 		vision: true,
@@ -120,9 +115,11 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		free: true,
 	}, // 262K, text, 29B MoE (4B active), 236K out
 	"kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true, free: true }, // 512K, text+image, expires 2026-12-31
-	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, expires 2026-10-31
-	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, expires 2026-10-31
 	"kilo/cohere/north-mini-code:free": { tools: true, vision: false, free: true }, // 256K, text, 64K out, code-specialised
+	// Laguna is still $0 today but expires 2026-10-31, so it is kept out of the
+	// default chain — an expiring model only shortens the failover list.
+	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, 32K out — expires 2026-10-31
+	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, 32K out — expires 2026-10-31
 	"kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false, free: true }, // 65K, text, 8K out — too small for real sessions
 
 	// ── Qwen / DashScope (Alibaba Cloud Model Studio) ───────────────────────

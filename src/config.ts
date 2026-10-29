@@ -115,19 +115,42 @@ export interface Config {
 	corsAllowedOrigins: string[];
 }
 
+/**
+ * Default failover chain: strongest free model first, routers last.
+ *
+ * Ordering rationale — every entry must support tool calling, and the head of
+ * the list carries the largest context/output budgets because Claude Code
+ * sends big prompts and large file rewrites:
+ *
+ *   1. Nemotron 3.5 Super VL  1M ctx, 131K out, vision+video
+ *   2. Beam 1.0 (free)        1M ctx, 131K out, reasoning/coding
+ *   3. Glyph Cluster          256K ctx, 256K out, frontier stealth model
+ *   4. Nemotron 3 Ultra       1M ctx, 550B MoE
+ *   5. Flint v1.0             262K ctx, 236K out, built for coding agents
+ *   6. North Mini Code        256K ctx, code-specialised
+ *   7. Dots 3 Note            512K ctx, vision (expires 2026-12-31)
+ *   8. Nemotron 3.5 Lightning 1M ctx, fast (the `haiku` alias target)
+ *   9. Xing4.0                262K ctx, 29B MoE
+ *  10. Nemotron Nano Omni     256K ctx, omni
+ *  11. OpenRouter Free        router — resolves server-side
+ *  12. Auto Free              router — kept last, resolves to a smaller model
+ *
+ * Retired and expiring ids are deliberately absent: `nemotron-3-super-120b-a12b`
+ * left the catalog on 2026-10-27, and both Laguna models expire 2026-10-31.
+ * They stay in the capability table so an explicit ALLOWED_MODELS entry still
+ * gets correct tool/vision flags, but a default chain should not be built on
+ * models with a known end date.
+ */
 const DEFAULT_FALLBACK_MODELS = [
 	"kilo/nvidia/nemotron-3.5-super-vl:free",
 	"kilo/reflection/beam-free",
 	"kilo/stealth/glyph-cluster",
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 	"kilo/recursive/flint-v1.0:free",
+	"kilo/cohere/north-mini-code:free",
 	"kilo/dots-studio/dots-3-note-preview:free",
 	"kilo/nvidia/nemotron-3.5-lightning:free",
-	"kilo/nvidia/nemotron-3-super-120b-a12b:free",
-	"kilo/poolside/laguna-s-2.1:free",
-	"kilo/cohere/north-mini-code:free",
 	"kilo/xingchen-agi/xing4.0-29b-a4b:free",
-	"kilo/poolside/laguna-xs-2.1:free",
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 	"kilo/openrouter/free",
 	"kilo/kilo-auto/free",

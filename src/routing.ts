@@ -15,15 +15,31 @@ import {
 	providerEnabled,
 	type UpstreamTarget,
 } from "./providers";
-import type { AnthropicMessagesRequest } from "./types";
+import type { AnthropicContentBlock, AnthropicMessagesRequest } from "./types";
+
+/**
+ * Whether a content block carries an image, including images nested inside a
+ * `tool_result`. Tool output is a common source of images (screenshots, Read on
+ * a PNG), and a text-only model sent one would either error or ignore it.
+ */
+function blockHasImage(block: AnthropicContentBlock): boolean {
+	if (block.type === "image") return true;
+	if (block.type !== "tool_result") return false;
+	const content = (block as { content?: unknown }).content;
+	return (
+		Array.isArray(content) &&
+		content.some(
+			(part) =>
+				part && typeof part === "object" && (part as { type?: string }).type === "image",
+		)
+	);
+}
 
 /** True when any user message carries an `image` content block. */
 export function requestNeedsVision(body: AnthropicMessagesRequest): boolean {
 	return (
 		body.messages?.some(
-			(message) =>
-				Array.isArray(message.content) &&
-				message.content.some((block) => block.type === "image"),
+			(message) => Array.isArray(message.content) && message.content.some(blockHasImage),
 		) ?? false
 	);
 }

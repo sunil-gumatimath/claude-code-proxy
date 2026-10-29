@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { StreamTranslator, translateRequest, translateResponse } from "../src/translate";
+import {
+	estimateTokens,
+	StreamTranslator,
+	translateRequest,
+	translateResponse,
+} from "../src/translate";
 
 describe("translateRequest", () => {
 	test("keeps requested model name and maps messages", () => {
@@ -313,7 +318,7 @@ describe("translateRequest", () => {
 		expect(out.top_p).toBe(0.9);
 	});
 
-	test("does not forward non-standard is_error on tool results", () => {
+	test("states a failed tool result in-band instead of forwarding is_error", () => {
 		const out = translateRequest({
 			model: "m",
 			messages: [
@@ -330,10 +335,57 @@ describe("translateRequest", () => {
 				},
 			],
 		});
+		// The flag is not an OpenAI field (strict gateways 400 on it), but a bare
+		// error string reads like a successful result, so the failure is stated
+		// in the content instead.
 		expect(out.messages[0]).toEqual({
 			role: "tool",
 			tool_call_id: "call_1",
-			content: "error occurred",
+			content: "[tool error] error occurred",
+		});
+	});
+
+	test("forwards images returned inside a tool_result after the tool message", () => {
+		// A screenshot or an image read comes back as tool output. OpenAI tool
+		// messages are text-only, so the picture rides in the next user message
+		// rather than being silently dropped.
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "tool_use", id: "call_1", name: "screenshot", input: {} }],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "call_1",
+							content: [
+								{ type: "text", text: "captured" },
+								{
+									type: "image",
+									source: {
+										type: "base64",
+										media_type: "image/png",
+										data: "QUJD",
+									},
+								},
+							],
+						},
+					],
+				},
+			],
+		});
+		expect(out.messages[1]).toEqual({
+			role: "tool",
+			tool_call_id: "call_1",
+			content: "captured",
+		});
+		expect(out.messages[2]).toEqual({
+			role: "user",
+			content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }],
 		});
 	});
 
@@ -632,6 +684,17 @@ describe("StreamTranslator", () => {
 		expect(joined).toContain("message_stop");
 		expect(joined).toContain("end_turn");
 		expect(t.isFinished).toBe(true);
+	});
+
+	test("message_start reports the estimated prompt size instead of zero", () => {
+		// The upstream's real prompt usage only arrives with the last chunk, long
+		// after message_start. Reporting 0 there makes the client's context meter
+		// and auto-compact decisions wrong.
+		const t = new StreamTranslator("m", 4321);
+		const start = t.processChunk(
+			JSON.stringify({ choices: [{ delta: { content: "x" }, index: 0 }] }),
+		);
+		expect(start.join("")).toContain('"input_tokens":4321');
 	});
 
 	test("finalize closes stream without finish_reason", () => {
@@ -1100,5 +1163,37 @@ describe("StreamTranslator", () => {
 		expect(signatureFor("same")).toBeDefined();
 		expect(signatureFor("same")).toBe(signatureFor("same"));
 		expect(signatureFor("different")).not.toBe(signatureFor("same"));
+	});
+});
+
+describe("estimateTokens", () => {
+	test("grows with the prompt text", () => {
+		const small = estimateTokens({ messages: [{ role: "user", content: "hi" }] });
+		const large = estimateTokens({
+			messages: [{ role: "user", content: "x".repeat(4000) }],
+		});
+		expect(large).toBeGreaterThan(small);
+		expect(large).toBeGreaterThan(900);
+	});
+
+	test("never reports zero for an empty prompt", () => {
+		expect(estimateTokens({ messages: [] })).toBeGreaterThanOrEqual(1);
+		expect(estimateTokens({})).toBeGreaterThanOrEqual(1);
+	});
+
+	test("charges an image a flat budget instead of its base64 length", () => {
+		// A single screenshot is a few thousand characters of base64. Counting it
+		// verbatim would report hundreds of thousands of tokens and make the
+		// client compact long before the context is actually full.
+		const image = `data:image/png;base64,${"A".repeat(400_000)}`;
+		const tokens = estimateTokens({
+			messages: [
+				{
+					role: "user",
+					content: [{ type: "image_url", image_url: { url: image } }],
+				},
+			],
+		});
+		expect(tokens).toBeLessThan(5000);
 	});
 });
