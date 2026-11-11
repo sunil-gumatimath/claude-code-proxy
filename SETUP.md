@@ -92,8 +92,8 @@ subset.
 | `PROXY_API_KEY` | *(unset)* | **Any non-loopback bind.** `POST /v1/messages` is not loopback-restricted |
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
-| `DEFAULT_MODEL` | `kilo/reflection/beam-free` | Pick a different primary model |
-| `FALLBACK_MODELS` | whole free tier, strongest first (12 models) | Control fallback order after upstream failures |
+| `DEFAULT_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Pick a different primary model |
+| `FALLBACK_MODELS` | the other free models, strongest first (11 models) | Control fallback order after upstream failures; the primary is not repeated |
 | `ALLOWED_MODELS` | every free Kilo model | Narrow the approval list, or opt in a paid model |
 | `FREE_MODELS_ONLY` | `true` | Set `false` to allow paid models that are allowlisted |
 | `VISION_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Your primary cannot read images — or you want the video-capable model for image turns |
@@ -126,7 +126,7 @@ subset.
 >
 > ```env
 > QWEN_API_KEY=sk-...
-> ALLOWED_MODELS=kilo/reflection/beam-free,qwen/qwen3.7-max,qwen/qwen3-coder-plus
+> ALLOWED_MODELS=kilo/nvidia/nemotron-3.5-super-vl:free,qwen/qwen3.7-max,qwen/qwen3-coder-plus
 > ```
 
 > **Never commit `.env`.** It is gitignored. Only share `.env.example`.
@@ -258,9 +258,9 @@ profile. Create `~/.claude/settings.json` if it does not exist:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
+    "ANTHROPIC_MODEL": "kilo/nvidia/nemotron-3.5-super-vl:free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "131072",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   }
 }
@@ -269,8 +269,8 @@ profile. Create `~/.claude/settings.json` if it does not exist:
 | Key | Why |
 |-----|-----|
 | `ANTHROPIC_MODEL` | Must be provider-qualified (`kilo/…` or `qwen/…`) or a `claude-*` name the alias table can route |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Beam, Nemotron 3.5 Super VL and Nemotron Ultra are `1000000`; Flint v1.0 and Xing4.0 are `262144` |
-| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Matches the proxy's hard `max_tokens` cap of `16384` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Nemotron 3.5 Super VL, Inkling 2 Small, Nemotron Ultra and Nemotron Lightning are `1048576`; ERNIE 5.5 Flash is `1024000`; Dots 3 Note is `512000`; LFM3 1.7B is `262144`; Glyph Cluster/North Mini Code are `256000` |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | The output ceiling of your model: `131072` for Nemotron 3.5 Super VL, `65536` for Ultra/Lightning, `921600` for ERNIE 5.5 Flash, `16384` for a model the catalog does not describe |
 | `ANTHROPIC_API_KEY` | Set to `""` if present, so Claude Code cannot call real Anthropic |
 
 Merge into an existing file rather than overwriting it — `settings.json` often
@@ -334,7 +334,7 @@ curl http://127.0.0.1:4181/health
 # A real upstream round trip
 curl -s http://127.0.0.1:4181/v1/messages \
   -H 'content-type: application/json' \
-  -d '{"model":"kilo/reflection/beam-free","max_tokens":64,
+  -d '{"model":"kilo/nvidia/nemotron-3.5-super-vl:free","max_tokens":64,
        "messages":[{"role":"user","content":"Reply with the single word: OK"}]}'
 
 # Token accounting (local estimate, never touches upstream)
@@ -361,12 +361,19 @@ If Claude errors immediately, check [Troubleshooting](#troubleshooting).
 
 ## Maintaining the free model list
 
-Kilo's free tier rotates as providers start and end promotions, and retired
-models are removed from the catalog entirely. To see what is free right now:
+Kilo's $0 tier rotates as providers start and end promotions, and retired
+models are removed from the catalog entirely. To see what bills $0 right now,
+read the gateway's own `isFree` flag (some free/stealth models do not have
+`free` in the id):
 
 ```bash
-curl -s https://api.kilo.ai/api/gateway/models \
-  | grep -o '"id":"[^"]*:free"'
+curl -s https://api.kilo.ai/api/gateway/models
+```
+
+For a report-only diff against `src/providers.ts` `CAPABILITIES` (missing/retired/repriced $0 entries; best-effort hints):
+
+```bash
+bun run catalog:check
 ```
 
 When a promoted model disappears, requests to it start failing with `404`. The
@@ -454,12 +461,12 @@ Two things to know:
 | Upstream 401 / 403 | Invalid Kilo key — regenerate at kilo.ai |
 | Upstream timeout | Increase `UPSTREAM_TIMEOUT_MS` (e.g. `300000`) |
 | Model not found | Check `MODEL_PREFIX` and model name Kilo expects. Kilo's free tier rotates — re-check the catalog (see [Maintaining the free model list](#maintaining-the-free-model-list)) |
-| `Model is not permitted by this free-only proxy` | The model is not in `ALLOWED_MODELS` (or is a paid Qwen model) — add it explicitly |
+| `Model is not permitted` | The model is not in `ALLOWED_MODELS` (or is a paid Qwen model) — add it explicitly. The error names the resolved target and the reason |
 | `No enabled model supports this request's required capabilities` | The model is unknown to the capability table, so it is assumed to support neither tools nor images. Add it to `CAPABILITIES` in `src/providers.ts` |
 | Claude Code stuck or `429` from the proxy | All `MAX_CONCURRENT_REQUESTS` slots are held; check `/metrics` for `kilo_proxy_streams_active` and `kilo_proxy_queued_requests` |
 | `Upstream stream stalled for more than Nms` | The upstream stopped sending mid-stream. Raise `UPSTREAM_TIMEOUT_MS` if your model is genuinely slow between chunks; the stalled slot is released automatically, so this is not a hang |
 | `Upstream timed out after Nms while reading the response body` | Same idea for a non-streaming request. The slot is released and the model is put in cooldown, so the next request prefers a different one |
-| Response cuts off mid-answer | `max_tokens` is capped at `16384`. Set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to `16384` so Claude Code budgets against the real ceiling. The proxy logs `clamped max_tokens` when it applies the cap |
+| Response cuts off mid-answer | `max_tokens` is capped at the ceiling of the model that actually served the turn — `131072` for Nemotron 3.5 Super VL, `921600` for ERNIE 5.5 Flash, `16384` for an unlisted model. Set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to that number so Claude Code budgets against the real ceiling. The proxy logs `clamped max_tokens` whenever it applies the cap |
 | `Upstream returned 400: tools[0].function.name must be a non-empty string` | A tool reached the gateway with no name — usually a hand-rolled request using the OpenAI tool shape. The Anthropic Messages API expects `{name, description, input_schema}`; the proxy translates to the OpenAI shape for you |
 | Feels slow | Clear `REASONING_EFFORT` in `.env` (forced high reasoning slows every request); switch to a faster model |
 | "not a model this version of Claude Code recognizes" | Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the model's real window so auto-compact doesn't assume 200K |

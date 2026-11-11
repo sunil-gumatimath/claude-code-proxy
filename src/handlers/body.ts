@@ -27,10 +27,20 @@ export function isBodyError(err: unknown, code: string): boolean {
  * stream is not reliable while a `read()` is pending, so the timeout rejects
  * and the `finally` cancels afterwards.
  */
+/**
+ * Per-chunk deadline for reading a client's request body.
+ *
+ * Deliberately independent of UPSTREAM_TIMEOUT_MS: that one bounds the
+ * upstream, while this bounds work arriving from the local client. They shared
+ * an implicit 120 s, which meant raising UPSTREAM_TIMEOUT_MS for a slow model
+ * silently did *not* extend how long a slow upload could take.
+ */
+export const DEFAULT_BODY_READ_TIMEOUT_MS = 120_000;
+
 export async function readBodyLimited(
 	req: Request,
 	maxBytes: number,
-	readTimeoutMs = 120_000,
+	readTimeoutMs = DEFAULT_BODY_READ_TIMEOUT_MS,
 ): Promise<string> {
 	const declared = req.headers.get("content-length");
 	if (declared && Number(declared) > maxBytes) {

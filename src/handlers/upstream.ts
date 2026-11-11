@@ -8,6 +8,7 @@ import { colors, error, log, redact } from "../log";
 import {
 	displayTarget,
 	getProvider,
+	maxOutputTokens,
 	normalizeReasoningEffort,
 	type ProviderName,
 	qualifyModel,
@@ -15,9 +16,13 @@ import {
 } from "../providers";
 import {
 	getRuntime,
+	modelHealthPenalty,
 	recordFallback,
+	recordModelFailure,
 	recordModelRequest,
+	recordModelSuccess,
 	recordUpstreamError,
+	recordUpstreamTimeout,
 } from "../runtime";
 import type { OpenAIChatRequest } from "../types";
 
@@ -27,6 +32,29 @@ const { green, yellow, dim } = colors;
 export function isAbortError(err: unknown): boolean {
 	const msg = err instanceof Error ? err.message : String(err);
 	return (err instanceof Error && err.name === "AbortError") || /abort/i.test(msg);
+}
+
+/**
+ * Parse Retry-After as a cooldown hint. Supports delay-seconds and HTTP-date.
+ * Result is clamped to a sane upper bound so a misbehaving upstream cannot
+ * quarantine a model for hours.
+ */
+export function retryAfterMs(
+	header: string | null | undefined,
+	now = Date.now(),
+): number | undefined {
+	if (!header) return undefined;
+	const value = header.trim();
+	if (!value) return undefined;
+	const maxMs = 5 * 60_000;
+	if (/^\d+$/.test(value)) {
+		return Math.min(maxMs, Math.max(0, Number(value) * 1000));
+	}
+	const date = Date.parse(value);
+	if (!Number.isNaN(date)) {
+		return Math.min(maxMs, Math.max(0, date - now));
+	}
+	return undefined;
 }
 
 /**
@@ -120,7 +148,18 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 	// if every candidate is in cooldown, trying them anyway beats refusing the
 	// request outright.
 	const fresh = targets.filter((t) => !cooldowns.isCooling(displayTarget(t)));
-	const ordered = fresh.length ? fresh : targets;
+	const base = fresh.length ? fresh : targets;
+	// Secondary health-aware ordering: keep the original/requested candidate in
+	// front when it is eligible at the head, and otherwise prefer healthier
+	// candidates among those with equal eligibility.
+	const ordered = (() => {
+		if (base.length <= 1) return base;
+		const penalty = (t: UpstreamTarget) => modelHealthPenalty(displayTarget(t));
+		if (base[0] === targets[0]) {
+			return [base[0], ...base.slice(1).sort((a, b) => penalty(a) - penalty(b))];
+		}
+		return [...base].sort((a, b) => penalty(a) - penalty(b));
+	})();
 
 	for (let attempt = 0; attempt < ordered.length; attempt++) {
 		const target = ordered[attempt];
@@ -131,6 +170,18 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 			provider.apiKey || (target.provider === requestedProvider ? requestApiKey : "");
 
 		const next: OpenAIChatRequest = { ...body, model: qualifyModel(target, config) };
+		// Clamp against *this* candidate: the chain spans models with 8K to 921K
+		// output budgets, so a ceiling chosen before routing would be wrong for
+		// every candidate but one. Logged once, on the first attempt, so a
+		// fallback turn does not repeat the same line.
+		const requestedMax = next.max_tokens;
+		const cap = maxOutputTokens(target);
+		if (requestedMax != null && requestedMax > cap) {
+			next.max_tokens = cap;
+			if (attempt === 0) {
+				log(`${dim("clamped max_tokens")} ${requestedMax} → ${cap} ${dim(requestId)}`);
+			}
+		}
 		const effort = normalizeReasoningEffort(target, next.reasoning_effort);
 		if (effort) {
 			next.reasoning_effort = effort as OpenAIChatRequest["reasoning_effort"];
@@ -139,6 +190,7 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 		}
 
 		recordModelRequest(displayTarget(target));
+		const attemptStarted = performance.now();
 		const controller = new AbortController();
 		const abortUpstream = () => controller.abort("Client disconnected");
 		signal.addEventListener("abort", abortUpstream, { once: true });
@@ -163,6 +215,7 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 
 			if (response.ok) {
 				cooldowns.succeed(displayTarget(target));
+				recordModelSuccess(displayTarget(target), performance.now() - attemptStarted);
 				clearTimeout(headerTimer);
 				if (attempt > 0) {
 					recordFallback();
@@ -181,7 +234,12 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 
 			const errText = await response.text();
 			recordUpstreamError(response.status);
-			if (isTransientStatus(response.status)) cooldowns.fail(displayTarget(target));
+			if (isTransientStatus(response.status)) {
+				cooldowns.fail(
+					displayTarget(target),
+					retryAfterMs(response.headers.get("retry-after")),
+				);
+			}
 			clearTimeout(headerTimer);
 			signal.removeEventListener("abort", abortUpstream);
 
@@ -206,7 +264,8 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 				};
 			}
 			if (isAbortError(err)) {
-				recordUpstreamError(504);
+				recordUpstreamTimeout();
+				recordModelFailure(displayTarget(target));
 				cooldowns.fail(displayTarget(target));
 				if (attempt < ordered.length - 1) {
 					log(
@@ -225,6 +284,7 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 			}
 
 			recordUpstreamError();
+			recordModelFailure(displayTarget(target));
 			cooldowns.fail(displayTarget(target));
 			if (attempt < ordered.length - 1) {
 				log(
@@ -235,7 +295,11 @@ export async function callUpstream(call: UpstreamCall): Promise<UpstreamOutcome>
 			const msg = err instanceof Error ? err.message : String(err);
 			return {
 				ok: false,
-				response: anthropicError(502, "api_error", `Failed to reach upstream: ${msg}`),
+				response: anthropicError(
+					502,
+					"api_error",
+					`Failed to reach upstream: ${redact(msg)}`,
+				),
 			};
 		}
 	}
@@ -252,7 +316,7 @@ function upstreamStatusResponse(response: Response, errText: string): Response {
 	return anthropicError(
 		response.status >= 400 && response.status < 600 ? response.status : 502,
 		mapUpstreamErrorType(response.status),
-		`Upstream returned ${response.status}: ${truncate(errText, 2000)}`,
+		`Upstream returned ${response.status}: ${truncate(redact(errText), 2000)}`,
 		retryAfter ? { "retry-after": retryAfter } : undefined,
 	);
 }

@@ -17,14 +17,14 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		modelPrefix: "",
 		defaultModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 		fallbackModels: [
-			"kilo/poolside/laguna-s-2.1:free",
+			"kilo/nvidia/nemotron-3.5-lightning:free",
 			"kilo/cohere/north-mini-code:free",
 			"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 		],
 		allowedModels: [
 			"kilo/nvidia/nemotron-3.5-super-vl:free",
 			"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-			"kilo/poolside/laguna-s-2.1:free",
+			"kilo/nvidia/nemotron-3.5-lightning:free",
 			"kilo/cohere/north-mini-code:free",
 			"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
 		],
@@ -32,7 +32,7 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		visionModel: "kilo/nvidia/nemotron-3.5-super-vl:free",
 		modelAliases: [
 			{ pattern: "*haiku*", model: "kilo/nvidia/nemotron-3.5-super-vl:free" },
-			{ pattern: "*sonnet*", model: "kilo/poolside/laguna-s-2.1:free" },
+			{ pattern: "*sonnet*", model: "kilo/nvidia/nemotron-3.5-lightning:free" },
 			{ pattern: "*opus*", model: "kilo/cohere/north-mini-code:free" },
 		],
 		reasoningEffort: "",
@@ -41,11 +41,16 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
 		maxQueuedRequests: 20,
 		modelCooldownMs: 30_000,
 		debug: false,
+		evlogDrain: "",
+		evlogDir: ".evlog/logs",
+		evlogMaxFiles: 14,
+		evlogPretty: false,
 		upstreamTimeoutMs: 120_000,
 		upstreamTlsRejectUnauthorized: true,
 		upstreamCaFile: "",
 		maxBodyBytes: 20 * 1024 * 1024,
 		corsAllowedOrigins: [],
+		allowUnauthenticatedRemote: false,
 		...overrides,
 	};
 }

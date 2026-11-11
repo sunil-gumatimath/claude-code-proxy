@@ -32,6 +32,10 @@ interface ModelCapabilities {
 	 * through ALLOWED_MODELS.
 	 */
 	free: boolean;
+	/** Advertised context window in tokens, when the catalog publishes one. */
+	contextLength?: number;
+	/** Largest output budget the model advertises, in tokens. */
+	maxOutput?: number;
 	/**
 	 * Upstream `reasoning_effort` values this model accepts, listed in
 	 * ascending order of strength (same order as `ANY_REASONING_EFFORT`).
@@ -54,15 +58,14 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
 
 /**
  * Kilo's free tier. Verified against the live gateway catalog
- * (GET {KILO_BASE_URL}/models, $0 prompt/completion) on 2026-10-29.
+ * (GET {KILO_BASE_URL}/models, `isFree: true`) on 2026-11-11.
  *
  * `free: true` means the upstream charges $0 today. The tier rotates as
- * providers end promotions — `stepfun/step-5-preview-free`,
- * `thinkingmachines/inkling-small:free`, and `nemotron-3-super-120b-a12b:free`
- * were all retired between checks — so re-check the catalog when a model
- * starts returning 404 (retired) or sustained 429 (capacity withdrawn). Every
- * current free model trains on your prompts (isFree + mayTrainOnYourPrompts on
- * the gateway), which is the price of the $0 tier.
+ * providers end promotions and some $0 "stealth/alpha" models change terms —
+ * retired or repriced ids disappear or start billing, so re-check the catalog
+ * when a model starts returning 404 (retired) or sustained 429 (capacity
+ * withdrawn). Free-tier prompts/completions may be retained for training; that
+ * is the price of the $0 tier.
  *
  * This table is the single source of truth for the free catalog: the default
  * ALLOWED_MODELS list in config.ts is derived from it, so a model cannot be
@@ -70,57 +73,98 @@ export const ANY_REASONING_EFFORT: readonly string[] = [
  */
 const CAPABILITIES: Record<string, ModelCapabilities> = {
 	// Routers — no fixed underlying model, so behaviour can change server-side.
-	"kilo/kilo-auto/free": { tools: true, vision: false, free: true }, // 256K, text only, 32K out
-	"kilo/openrouter/free": { tools: true, vision: true, free: true }, // 200K, text+image
+	"kilo/kilo-auto/free": {
+		tools: true,
+		vision: false,
+		free: true,
+		contextLength: 256_000,
+		maxOutput: 32_768,
+	},
+	"kilo/openrouter/free": {
+		tools: true,
+		vision: true,
+		free: true,
+		contextLength: 200_000,
+		// The router publishes no output ceiling; the default cap applies.
+	},
 
-	// NVIDIA Nemotron — the strongest free tier for long-context agentic work.
+	// NVIDIA Nemotron — strong free tier for long-context agentic work.
 	"kilo/nvidia/nemotron-3.5-super-vl:free": {
 		tools: true,
 		vision: true,
 		free: true,
-	}, // 1M, text+image+video, 131K out
+		contextLength: 1_000_000,
+		maxOutput: 131_072,
+	},
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free": {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 1M, text, 64K out
-	"kilo/nvidia/nemotron-3.5-lightning:free": { tools: true, vision: false, free: true }, // 1M, text, 64K out
-	"kilo/nvidia/nemotron-3.5-content-safety:free": {
-		tools: false,
-		vision: true,
+		contextLength: 1_000_000,
+		maxOutput: 65_536,
+	},
+	"kilo/nvidia/nemotron-3.5-lightning:free": {
+		tools: true,
+		vision: false,
 		free: true,
-	}, // 128K, text+image classifier — no tool support
+		contextLength: 1_000_000,
+		maxOutput: 65_536,
+	},
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free": {
 		tools: true,
 		vision: true,
 		free: true,
-	}, // 256K, omni (text+image+audio+video), 64K out
+		contextLength: 256_000,
+		maxOutput: 65_536,
+	},
 
-	// Reflection Beam — reasoning model for coding and agentic workflows; the
-	// new default primary now that Step 5 Preview's free variant is retired.
-	"kilo/reflection/beam-free": {
+	// Stealth — reasoning models served at $0 during their stealth period.
+	"kilo/stealth/glyph-cluster": {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 1M, text, function calling + structured outputs, 131K out
-	"kilo/stealth/glyph-cluster": { tools: true, vision: false, free: true }, // 256K, text, 256K out
-	"kilo/recursive/flint-v1.0:free": {
+		contextLength: 256_000,
+		maxOutput: 256_000,
+	},
+
+	// Baidu / Thinking Machines — newest $0 entrants, with the biggest budgets.
+	"kilo/baidu/ernie-5.5-flash-preview:free": {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 262K, text, 40B MoE (2.5B active) built for coding agents, 236K out
-	"kilo/xingchen-agi/xing4.0-29b-a4b:free": {
+		contextLength: 1_024_000,
+		maxOutput: 921_600,
+	},
+	"kilo/thinkingmachines/inkling-2-small:free": {
+		tools: true,
+		vision: true,
+		free: true,
+		contextLength: 1_048_576,
+		maxOutput: 131_072,
+	},
+
+	// Other $0 models (catalog-verified 2026-11-11).
+	"kilo/dots-studio/dots-3-note-preview:free": {
+		tools: true,
+		vision: true,
+		free: true,
+		contextLength: 512_000,
+		maxOutput: 460_800,
+	},
+	"kilo/cohere/north-mini-code:free": {
 		tools: true,
 		vision: false,
 		free: true,
-	}, // 262K, text, 29B MoE (4B active), 236K out
-	"kilo/dots-studio/dots-3-note-preview:free": { tools: true, vision: true, free: true }, // 512K, text+image, expires 2026-12-31
-	"kilo/cohere/north-mini-code:free": { tools: true, vision: false, free: true }, // 256K, text, 64K out, code-specialised
-	// Laguna is still $0 today but expires 2026-10-31, so it is kept out of the
-	// default chain — an expiring model only shortens the failover list.
-	"kilo/poolside/laguna-s-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, 32K out — expires 2026-10-31
-	"kilo/poolside/laguna-xs-2.1:free": { tools: true, vision: false, free: true }, // 262K, text, 32K out — expires 2026-10-31
-	"kilo/liquid/lfm-2.5-2.6b:free": { tools: true, vision: false, free: true }, // 65K, text, 8K out — too small for real sessions
+		contextLength: 256_000,
+		maxOutput: 64_000,
+	},
+	"kilo/liquid/lfm-3-1.7b:free": {
+		tools: true,
+		vision: false,
+		free: true,
+		contextLength: 262_144,
+		maxOutput: 8_192,
+	},
 
 	// ── Qwen / DashScope (Alibaba Cloud Model Studio) ───────────────────────
 	// No free model tier: these bill per token once the promotional quota is
@@ -279,6 +323,21 @@ export function getCapabilities(target: UpstreamTarget): ModelCapabilities {
 	return (
 		CAPABILITIES[displayTarget(target)] ?? { tools: false, vision: false, free: false }
 	);
+}
+
+/** Output ceiling used when the model's own budget is unknown. */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 16_384;
+
+/**
+ * Largest `max_tokens` this model is known to emit.
+ *
+ * The ceiling has to be per model: the free tier spans 8K (LFM3 1.7B) to 921K
+ * (ERNIE 5.5 Flash), so a single global cap either truncates a model built for
+ * large rewrites or promises output a small one cannot deliver. Unknown models
+ * keep the conservative default.
+ */
+export function maxOutputTokens(target: UpstreamTarget): number {
+	return CAPABILITIES[displayTarget(target)]?.maxOutput ?? DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
 /**

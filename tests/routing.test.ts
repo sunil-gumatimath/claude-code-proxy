@@ -127,6 +127,43 @@ describe("requestNeedsVision", () => {
 			}),
 		).toBe(false);
 	});
+
+	// A PDF arrives as a base64 `document` block. Leaving it out of the check
+	// routed it to a text-only model, which cannot consume the attachment.
+	test("a binary document attachment needs a multimodal model", () => {
+		expect(
+			requestNeedsVision({
+				messages: [
+					{
+						role: "user",
+						content: [
+							{
+								type: "document",
+								source: {
+									type: "base64",
+									media_type: "application/pdf",
+									data: "JVBERi0=",
+								},
+							},
+						],
+					},
+				],
+			}),
+		).toBe(true);
+	});
+
+	test("a text-source document is flattened to text, so it is not vision", () => {
+		expect(
+			requestNeedsVision({
+				messages: [
+					{
+						role: "user",
+						content: [{ type: "document", source: { type: "text", data: "notes" } }],
+					},
+				],
+			}),
+		).toBe(false);
+	});
 });
 
 // ── isTargetAllowed (the cost gate) ──────────────────────────────────────────
@@ -141,7 +178,10 @@ describe("isTargetAllowed", () => {
 			),
 		).toBe(true);
 		expect(
-			isTargetAllowed({ provider: "kilo", model: "poolside/laguna-s-2.1:free" }, cfg),
+			isTargetAllowed(
+				{ provider: "kilo", model: "nvidia/nemotron-3.5-lightning:free" },
+				cfg,
+			),
 		).toBe(true);
 	});
 
@@ -157,7 +197,10 @@ describe("isTargetAllowed", () => {
 	test("model absent from a non-empty allowlist → false", () => {
 		const cfg = testConfig({ allowedModels: ["kilo/nvidia/nemotron-3.5-super-vl:free"] });
 		expect(
-			isTargetAllowed({ provider: "kilo", model: "poolside/laguna-s-2.1:free" }, cfg),
+			isTargetAllowed(
+				{ provider: "kilo", model: "nvidia/nemotron-3.5-lightning:free" },
+				cfg,
+			),
 		).toBe(false);
 	});
 
@@ -289,7 +332,7 @@ describe("resolveTarget", () => {
 	test("claude-* routes through the first matching alias", () => {
 		expect(resolveTarget("claude-sonnet-4-20250514", textBody, testConfig())).toEqual({
 			provider: "kilo",
-			model: "poolside/laguna-s-2.1:free",
+			model: "nvidia/nemotron-3.5-lightning:free",
 		});
 	});
 
@@ -340,8 +383,8 @@ describe("buildCandidateTargets", () => {
 		const cfg = testConfig({
 			fallbackModels: [
 				"kilo/nvidia/nemotron-3.5-super-vl:free", // same as the requested target
-				"kilo/poolside/laguna-s-2.1:free",
-				"kilo/poolside/laguna-s-2.1:free", // explicit duplicate
+				"kilo/nvidia/nemotron-3.5-lightning:free",
+				"kilo/nvidia/nemotron-3.5-lightning:free", // explicit duplicate
 			],
 		});
 		const targets = buildCandidateTargets(
@@ -432,7 +475,7 @@ describe("buildCandidateTargets", () => {
 		// The requested Qwen model is dropped; the free Kilo fallbacks remain.
 		expect(ids).not.toContain("qwen/qwen3-max");
 		expect(ids.every((id) => id.startsWith("kilo/"))).toBe(true);
-		expect(ids).toContain("kilo/poolside/laguna-s-2.1:free");
+		expect(ids).toContain("kilo/nvidia/nemotron-3.5-lightning:free");
 	});
 
 	test("an image request drops every non-vision candidate", () => {

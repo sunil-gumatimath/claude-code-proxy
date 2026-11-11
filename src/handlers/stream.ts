@@ -3,8 +3,10 @@
 // ============================================================================
 
 import { anthropicErrorSse } from "../errors";
-import { colors, error, log } from "../log";
+import { colors, error, log, redact } from "../log";
+import { recordStreamRetry } from "../runtime";
 import { StreamTranslator } from "../translate";
+import type { WideHandle } from "../wide";
 
 /**
  * Incremental SSE frame decoder.
@@ -130,6 +132,13 @@ interface StreamPumpOptions {
 	model: string;
 	/** Echoed back as x-request-id for client-side correlation. */
 	requestId: string;
+	/**
+	 * The candidate currently serving this turn, read at completion so a turn
+	 * that fell back is recorded against the model that actually answered.
+	 */
+	routedModel?: () => string;
+	/** Wide event for this turn, emitted once whichever way the stream ends. */
+	wide?: WideHandle;
 	/** High-resolution start time, for the completion log line. */
 	startTime: number;
 	/** Aborts the current upstream once the stream is done or abandoned. */
@@ -185,6 +194,8 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 	const {
 		model,
 		requestId,
+		routedModel,
+		wide,
 		startTime,
 		upstreamController,
 		cleanup,
@@ -217,6 +228,25 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 		cleanup();
 	};
 
+	/**
+	 * One wide event per streamed turn, whichever way it ended. Guarded because
+	 * the failure path and `cancel()` can both fire for the same stream.
+	 */
+	let completionEmitted = false;
+	const emitCompletion = (outcome: string, status: number, reason?: string) => {
+		if (completionEmitted) return;
+		completionEmitted = true;
+		wide?.set({
+			routedModel: routedModel?.(),
+			status,
+			outcome,
+			...translator.usage,
+			latencyMs: Math.round(performance.now() - startTime),
+			...(reason ? { error: reason } : {}),
+		});
+		wide?.emit();
+	};
+
 	// The consumer can disappear between any two of our checks, so every
 	// controller touch goes through a guard rather than assuming liveness.
 	const safeEnqueue = (controller: ReadableStreamDefaultController, data: Uint8Array) => {
@@ -240,6 +270,16 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 
 	const readable = new ReadableStream({
 		async start(controller) {
+			// Commit bytes immediately so a slow first token does not look like a
+			// dead connection: a cold free-tier turn can take 10-16s before the
+			// upstream emits anything, which is long enough for an idle timeout or
+			// a user to give up. This is an SSE *comment*, not a `ping` event —
+			// every SSE parser ignores comments (including Anthropic's), whereas a
+			// `ping` before `message_start` breaks the expected event order. It
+			// deliberately leaves `emitted` false, so a failed attempt can still be
+			// replaced transparently: a comment carries no message state.
+			safeEnqueue(controller, encoder.encode(": keep-alive\n\n"));
+
 			let idleTimer: ReturnType<typeof setTimeout> | undefined;
 			let idleTimedOut = false;
 
@@ -293,6 +333,7 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 				current = next;
 				// Nothing from the abandoned attempt escaped, so start clean.
 				translator = new StreamTranslator(model, inputTokens);
+				recordStreamRetry();
 				return true;
 			};
 
@@ -393,8 +434,9 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 						}
 						safeEnqueue(
 							controller,
-							encoder.encode(anthropicErrorSse("api_error", result.reason)),
+							encoder.encode(anthropicErrorSse("api_error", redact(result.reason))),
 						);
+						emitCompletion("error", 502, result.reason);
 						safeClose(controller);
 						return;
 					}
@@ -403,6 +445,7 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 					log(
 						`${colors.green("←")} stream ${colors.dim(model)} complete ${colors.dim(`${elapsed}ms`)} ${colors.dim(requestId)}`,
 					);
+					emitCompletion("complete", 200);
 					safeClose(controller);
 					return;
 				}
@@ -414,6 +457,7 @@ export function handleStream(upstream: Response, options: StreamPumpOptions): Re
 		},
 		async cancel() {
 			canceled = true;
+			emitCompletion("canceled", 499);
 			current.controller.abort("Client stopped reading stream");
 			onceCleanup();
 		},

@@ -10,6 +10,7 @@ import type { Config } from "./config";
 import {
 	displayTarget,
 	getCapabilities,
+	getProvider,
 	isFreeTarget,
 	parseTarget,
 	providerEnabled,
@@ -18,12 +19,20 @@ import {
 import type { AnthropicContentBlock, AnthropicMessagesRequest } from "./types";
 
 /**
- * Whether a content block carries an image, including images nested inside a
- * `tool_result`. Tool output is a common source of images (screenshots, Read on
- * a PNG), and a text-only model sent one would either error or ignore it.
+ * Whether a content block needs a multimodal model: an `image`, an image
+ * nested inside a `tool_result`, or a binary `document` (PDF) attachment.
+ *
+ * Tool output is a common source of images (a browser screenshot, Read on a
+ * PNG), and a text-only model sent one either errors or silently ignores it.
+ * A `document` with a *text* source is flattened to text by the translator, so
+ * it deliberately does not count here.
  */
 function blockHasImage(block: AnthropicContentBlock): boolean {
 	if (block.type === "image") return true;
+	if (block.type === "document") {
+		const source = (block as { source?: { type?: string } }).source;
+		return source?.type === "base64";
+	}
 	if (block.type !== "tool_result") return false;
 	const content = (block as { content?: unknown }).content;
 	return (
@@ -35,7 +44,7 @@ function blockHasImage(block: AnthropicContentBlock): boolean {
 	);
 }
 
-/** True when any user message carries an `image` content block. */
+/** True when any message carries a block only a multimodal model can read. */
 export function requestNeedsVision(body: AnthropicMessagesRequest): boolean {
 	return (
 		body.messages?.some(
@@ -92,12 +101,111 @@ export function resolveTarget(
  * it can never widen what a client is allowed to reach.
  */
 export function isTargetAllowed(target: UpstreamTarget, config: Config): boolean {
+	return !explainAllowlistRejection(target, config);
+}
+
+/** Why the cost/allowlist gate rejects a target, or undefined if allowed. */
+export function explainAllowlistRejection(
+	target: UpstreamTarget,
+	config: Config,
+): string | undefined {
 	const id = displayTarget(target);
 	const explicitlyAllowed = config.allowedModels.includes(id);
-	// FREE_MODELS_ONLY rejects paid models unless the operator has explicitly
-	// allowlisted them (ALLOWED_MODELS is an explicit approval list).
-	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed) return false;
-	return !config.allowedModels.length || explicitlyAllowed;
+	if (config.freeModelsOnly && !isFreeTarget(target) && !explicitlyAllowed) {
+		return "blocked by FREE_MODELS_ONLY (not a recognized free-tier model and not explicitly allowlisted)";
+	}
+	if (config.allowedModels.length && !explicitlyAllowed) {
+		return "not in ALLOWED_MODELS";
+	}
+	return undefined;
+}
+
+function providerKeyAvailable(
+	config: Config,
+	target: UpstreamTarget,
+	first: UpstreamTarget,
+	requestApiKey: string,
+): boolean {
+	return providerEnabled(
+		config,
+		target.provider,
+		target.provider === first.provider ? requestApiKey : "",
+	);
+}
+
+/** Why a candidate cannot serve this request, or undefined if usable. */
+export function explainCandidateRejection(
+	target: UpstreamTarget,
+	body: AnthropicMessagesRequest,
+	config: Config,
+	first: UpstreamTarget,
+	requestApiKey = "",
+): string | undefined {
+	const allow = explainAllowlistRejection(target, config);
+	if (allow) return allow;
+	if (!providerKeyAvailable(config, target, first, requestApiKey)) {
+		const hasConfigured = Boolean(getProvider(config, target.provider).apiKey);
+		const crossProviderClientKey =
+			!hasConfigured && Boolean(requestApiKey) && target.provider !== first.provider;
+		return crossProviderClientKey
+			? `no API key configured for provider ${target.provider} (a request-supplied key is only applied to the requested provider)`
+			: `no API key configured for provider ${target.provider}`;
+	}
+	const needsTools = Boolean(body.tools?.length);
+	const needsVision = requestNeedsVision(body);
+	const capabilities = getCapabilities(target);
+	const missing: string[] = [];
+	if (needsTools && !capabilities.tools) missing.push("tool calling");
+	if (needsVision && !capabilities.vision) missing.push("image/vision input");
+	if (missing.length) return `model does not support ${missing.join(" or ")}`;
+	return undefined;
+}
+
+/**
+ * A short, operator-facing diagnosis for "no usable candidates". Mirrors the
+ * same filters as buildCandidateTargets so the message explains the real
+ * outcome without leaking credentials.
+ */
+export function diagnoseNoCandidates(
+	first: UpstreamTarget,
+	body: AnthropicMessagesRequest,
+	config: Config,
+	requestApiKey = "",
+): string {
+	const requested = displayTarget(first);
+	const requestedReason = explainCandidateRejection(
+		first,
+		body,
+		config,
+		first,
+		requestApiKey,
+	);
+	const fallbacks = config.fallbackModels.map((model) => parseTarget(model));
+	const reasons = new Set<string>();
+	let usableFallbackShape = 0;
+	for (const target of fallbacks) {
+		if (displayTarget(target) === requested) continue;
+		const reason = explainCandidateRejection(target, body, config, first, requestApiKey);
+		if (!reason) {
+			usableFallbackShape++;
+		} else {
+			reasons.add(reason);
+		}
+	}
+	const parts = [`Requested model ${requested}: ${requestedReason ?? "not usable"}.`];
+	if (!fallbacks.length) {
+		parts.push("No FALLBACK_MODELS are configured.");
+	} else if (usableFallbackShape === 0) {
+		parts.push(
+			reasons.size
+				? `No fallback candidate was usable (${[...reasons].join("; ")}).`
+				: "No fallback candidate was usable.",
+		);
+	}
+	parts.push(
+		"Check ALLOWED_MODELS/FREE_MODELS_ONLY, provider API keys, and the model's tool/vision capabilities.",
+	);
+	return parts.join(" ");
 }
 
 /**
@@ -112,26 +220,14 @@ export function buildCandidateTargets(
 	config: Config,
 	requestApiKey = "",
 ): UpstreamTarget[] {
-	const needsTools = Boolean(body.tools?.length);
-	const needsVision = requestNeedsVision(body);
 	const targets = [first, ...config.fallbackModels.map((model) => parseTarget(model))];
 	return [
 		...new Map(
 			targets
-				.filter((target) => isTargetAllowed(target, config))
-				.filter((target) =>
-					providerEnabled(
-						config,
-						target.provider,
-						target.provider === first.provider ? requestApiKey : "",
-					),
+				.filter(
+					(target) =>
+						!explainCandidateRejection(target, body, config, first, requestApiKey),
 				)
-				.filter((target) => {
-					const capabilities = getCapabilities(target);
-					return (
-						(!needsTools || capabilities.tools) && (!needsVision || capabilities.vision)
-					);
-				})
 				.map((target) => [displayTarget(target), target]),
 		).values(),
 	];

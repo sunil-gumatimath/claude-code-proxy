@@ -2,10 +2,12 @@ import { describe, expect, test } from "bun:test";
 import {
 	ANY_REASONING_EFFORT,
 	canonicalizeModelId,
+	DEFAULT_MAX_OUTPUT_TOKENS,
 	displayTarget,
 	freeModelIds,
 	getCapabilities,
 	isFreeTarget,
+	maxOutputTokens,
 	normalizeReasoningEffort,
 	parseTarget,
 	qualifyModel,
@@ -91,8 +93,8 @@ describe("qualifyModel", () => {
 	});
 
 	test("an empty prefix leaves the model untouched", () => {
-		expect(qualifyModel(kilo("reflection/beam-free"), testConfig())).toBe(
-			"reflection/beam-free",
+		expect(qualifyModel(kilo("baidu/ernie-5.5-flash-preview:free"), testConfig())).toBe(
+			"baidu/ernie-5.5-flash-preview:free",
 		);
 	});
 });
@@ -173,5 +175,17 @@ describe("normalizeReasoningEffort", () => {
 
 	test("the vocabulary match is case-insensitive", () => {
 		expect(normalizeReasoningEffort(kilo("tencent/HY3-preview"), "xhigh")).toBe("high");
+	});
+});
+
+describe("maxOutputTokens", () => {
+	test("uses each model's own output budget", () => {
+		expect(maxOutputTokens(kilo("baidu/ernie-5.5-flash-preview:free"))).toBe(921_600);
+		expect(maxOutputTokens(kilo("nvidia/nemotron-3.5-super-vl:free"))).toBe(131_072);
+		expect(maxOutputTokens(kilo("liquid/lfm-3-1.7b:free"))).toBe(8_192);
+	});
+
+	test("unknown models keep the conservative default", () => {
+		expect(maxOutputTokens(kilo("who/knows"))).toBe(DEFAULT_MAX_OUTPUT_TOKENS);
 	});
 });

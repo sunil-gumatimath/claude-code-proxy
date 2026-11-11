@@ -18,8 +18,8 @@ ships pointed at Kilo's free tier by default, so a full setup costs nothing.
   stalled upstream cannot wedge the proxy
 - **Fail-closed configuration** — unrecognised booleans keep their secure
   default, so a typo cannot silently switch off a safety gate
-- **Loud about the sharp edge** — any non-loopback bind is announced at startup,
-  because the data plane is not loopback-restricted
+- **Fail-fast on unsafe exposure** — a non-loopback bind without `PROXY_API_KEY`
+  is refused at startup (explicit `ALLOW_UNAUTHENTICATED_REMOTE=true` opt-in only)
 
 ## Quick start
 
@@ -53,9 +53,9 @@ Point Claude Code at it — for a persistent setup, put this in
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
+    "ANTHROPIC_MODEL": "kilo/nvidia/nemotron-3.5-super-vl:free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1048576",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384"
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "131072"
   }
 }
 ```
@@ -77,7 +77,7 @@ me for a Kilo API key (never print or expose it), start the proxy with
 `bun run start`, verify http://127.0.0.1:4181/health returns "ok", then merge
 an `env` block into ~/.claude/settings.json per README's "Configure Claude
 Code" section with ANTHROPIC_BASE_URL=http://127.0.0.1:4181,
-ANTHROPIC_MODEL=kilo/reflection/beam-free, and
+ANTHROPIC_MODEL=kilo/nvidia/nemotron-3.5-super-vl:free, and
 CLAUDE_CODE_MAX_CONTEXT_TOKENS=1000000 — back the file up first and do not
 overwrite existing keys. Prefer UPSTREAM_CA_FILE for TLS problems; use
 UPSTREAM_TLS_REJECT_UNAUTHORIZED=false only after explaining the risk. Confirm
@@ -87,71 +87,69 @@ one small /v1/messages request succeeds and report anything I still need to do.
 ## Recommended free model
 
 ```env
-DEFAULT_MODEL=kilo/reflection/beam-free
+DEFAULT_MODEL=kilo/nvidia/nemotron-3.5-super-vl:free
 REASONING_EFFORT=medium
 ```
 
-Beam 1.0 (free) is the default primary: Reflection's reasoning model for coding
-and agentic workflows, on Kilo's free tier with **1M-token context**, function
-calling, structured outputs, streaming, and up to 131K output tokens — built
-for software engineering and long-horizon workflows. As with every current Kilo
-free-tier model, prompts are retained for training; that is the price of the
-$0 tier. `VISION_MODEL` points at **Nemotron 3.5 Super VL** (1M context, native
-image *and video*), so image/video input reroutes to a purpose-built
-multimodal model.
+Nemotron 3.5 Super VL (free) is the default primary: NVIDIA's open multimodal
+MoE (120B total, 12B active) on Kilo's free tier with **1M-token context**,
+function calling, structured outputs, streaming, and up to 131K output tokens.
+It is also the highest-ranked free model on Kilo's own leaderboard — **#6 on the
+Code agent** with a *Recommended* badge, and 34% of Kilo's coding traffic — so it
+leads here on real usage rather than a vendor benchmark. As with every current
+Kilo free-tier model, prompts are retained for training; that is the price of
+the $0 tier. It is already multimodal (text, image, *and video*), so
+`VISION_MODEL` only matters if you point `DEFAULT_MODEL` at a text-only model.
 
-`FALLBACK_MODELS` walks the free tier, strongest first — Nemotron 3.5 Super VL
-(vision+video, 1M), Beam (reasoning/coding, 1M), the **Glyph Cluster** stealth
-frontier model (256K output tokens), Nemotron Ultra (1M, 550B MoE), Flint v1.0
-(40B MoE built for coding agents), North Mini Code (code-specialised), Dots 3
-Note (vision, expires 2026-12-31), Nemotron Lightning (fast), Xing4.0 (29B MoE),
-Nemotron Nano Omni (omni), OpenRouter Free, and finally `kilo/kilo-auto/free` —
-Kilo's own free router, kept last because it resolves server-side to a smaller
-model for free accounts. Every entry supports tool calling, and the head of the
-list has the biggest context and output budgets because Claude Code sends large
-prompts and large file rewrites.
+`DEFAULT_MODEL` is the strongest free coder, and `FALLBACK_MODELS` holds the
+rest of the free tier in ranked order, so a fallback only runs when the primary
+actually failed — **ERNIE 5.5 Flash** (1M ctx, **921K out**, the
+largest output budget on the free tier), **Glyph Cluster** (stealth reasoning
+model for coding and long-context analysis, 256K in/out), **Inkling 2 Small**
+(1.05M ctx, text+image, 131K out), Nemotron Ultra (1M, 550B MoE), Nemotron
+Lightning (fast), North Mini Code (code-specialised), Dots 3 Note (vision,
+460K out), Nemotron Nano Omni (omni), LFM3 1.7B (compact), OpenRouter Free, and
+finally `kilo/kilo-auto/free` — Kilo's own free router, kept last because it
+resolves server-side. Every entry in the default chain supports tool calling,
+and the head of the list has the biggest context/output budgets because Claude
+Code sends large prompts and large file rewrites.
 
-`MODEL_ALIASES` tiers the bare `claude-*` names: Opus and Sonnet both route to
-Beam, Haiku to the fast Nemotron 3.5 Lightning.
+`MODEL_ALIASES` tiers the bare `claude-*` names: Opus routes to the 550B
+Nemotron Ultra, Sonnet to Nemotron 3.5 Super VL, and Haiku to the fast Nemotron
+3.5 Lightning.
 
 `REASONING_EFFORT=high` forces high reasoning on every turn. Clear it to derive
 effort from Claude Code's thinking budget instead.
 
 ### Current free models
 
-Verified against the live Kilo catalog on **2026-10-29** — every one bills `$0`
-today. All support tool calling except the content-safety classifier; `✗` marks
-that one. Since the previous check (2026-10-24), `nemotron-3-super-120b-a12b:free`
-was retired (it left the catalog on 2026-10-27) and both Laguna models were
-scheduled to expire on 2026-10-31, so none of the three is in the default
-`FALLBACK_MODELS` chain.
+Verified against the live Kilo catalog on **2026-11-11** — every model below
+carries the gateway's own `isFree: true` flag and bills `$0` at check time.
+Kilo's $0 tier rotates (Beam and Crouton Alpha were both retired during
+2026-11), and some stealth/alpha models can change terms, so re-check when a
+model 404s or 429s.
 
 | Model | Context | Input | Tools | Role |
 | --- | --- | --- | --- | --- |
-| `kilo/reflection/beam-free` | 1M | text | ✓ | **default primary** — coding/agentic reasoning, 131K output |
-| `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default vision model**, 131K output |
-| `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth frontier model, 256K output |
-| `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | text | ✓ | 550B MoE (55B active) |
-| `kilo/recursive/flint-v1.0:free` | 262K | text | ✓ | 40B MoE (2.5B active), built for coding agents |
-| `kilo/xingchen-agi/xing4.0-29b-a4b:free` | 262K | text | ✓ | 29B MoE (4B active) |
+| `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default primary + vision** — Code agent #6 on Kilo's leaderboard, 131K output |
+| `kilo/baidu/ernie-5.5-flash-preview:free` | 1M | text | ✓ | **largest output on the free tier** — 921K, coding/agentic |
+| `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth reasoning model for coding + long-context analysis, 256K output |
+| `kilo/thinkingmachines/inkling-2-small:free` | 1.05M | text, image | ✓ | 594B MoE (17B active), multimodal reasoning, 131K output |
+| `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | text | ✓ | 550B MoE (55B active), orchestration — the `opus` alias target |
 | `kilo/nvidia/nemotron-3.5-lightning:free` | 1M | text | ✓ | fast — the `haiku` alias target |
-| `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | expires 2026-12-31 |
 | `kilo/cohere/north-mini-code:free` | 256K | text | ✓ | code-specialised |
-| `kilo/poolside/laguna-s-2.1:free` | 262K | text | ✓ | coding agent — expires 2026-10-31 — **not in the default chain** |
-| `kilo/poolside/laguna-xs-2.1:free` | 262K | text | ✓ | fast coding agent — expires 2026-10-31 — **not in the default chain** |
 | `kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free` | 256K | text, image, audio, video | ✓ | omni |
+| `kilo/dots-studio/dots-3-note-preview:free` | 512K | text, image | ✓ | preview (terms may change), 460K output |
+| `kilo/liquid/lfm-3-1.7b:free` | 262K | text | ✓ | compact 1.7B, 8K output — agent/tool-capable |
 | `kilo/openrouter/free` | 200K | text, image | ✓ | OpenRouter free router |
 | `kilo/kilo-auto/free` | 256K | text | ✓ | Kilo's own free router |
-| `kilo/liquid/lfm-2.5-2.6b:free` | 65K | text | ✓ | tiny (2.6B, 8K output) — rarely worth it |
-| `kilo/nvidia/nemotron-3.5-content-safety:free` | 128K | text, image | ✗ | classifier, no tool support |
 
-Kilo's free tier rotates as providers end promotions, and the proxy already
-fails over and cools down dead models automatically. To re-check what is free
-right now (the ids can end in either `:free` or `-free`):
+Kilo's $0 tier rotates as providers end promotions, and the proxy already
+fails over and cools down dead models automatically. To re-check what is $0
+right now (note: some $0 models, like `stealth/*`, do not have `free` in the id):
 
 ```bash
-curl -s https://api.kilo.ai/api/gateway/models \
-  | grep -o '"id":"[^"]*-free"'
+curl -s https://api.kilo.ai/api/gateway/models
 ```
 
 `ALLOWED_MODELS` is an explicit approval list: with `FREE_MODELS_ONLY=true`
@@ -172,9 +170,9 @@ missing) so every session points at the proxy and the model you want:
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:4181",
     "ANTHROPIC_AUTH_TOKEN": "local-proxy",
-    "ANTHROPIC_MODEL": "kilo/reflection/beam-free",
+    "ANTHROPIC_MODEL": "kilo/nvidia/nemotron-3.5-super-vl:free",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "1000000",
-    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "16384",
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "131072",
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
   }
 }
@@ -188,16 +186,24 @@ Notes:
   `KILO_API_KEY` is set in `.env`). Set `ANTHROPIC_API_KEY` to `""` so Claude
   Code never calls real Anthropic by mistake.
 - `ANTHROPIC_MODEL` names the model Claude Code asks for. Use a
-  provider-qualified ID (e.g. `kilo/reflection/beam-free`) to bypass the
+  provider-qualified ID (e.g. `kilo/nvidia/nemotron-3.5-super-vl:free`) to bypass the
   alias table, or a `claude-*` name to let `MODEL_ALIASES` route it.
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
-  context size of whichever model you actually run (1048576 for Beam,
-  Nemotron 3.5 Super VL and Nemotron Ultra; 262144 for Flint v1.0 and Xing4.0;
-  256000 for Glyph Cluster).
-- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the proxy's hard cap of `16384`
-  on `max_tokens`, so Claude Code budgets against what it can actually get.
-  Requests above the cap are clamped, and the clamp is logged.
+  context size of whichever model you actually run (1048576 for Nemotron 3.5
+  Super VL, Inkling 2 Small, Nemotron Ultra, or Nemotron Lightning; 1024000 for
+  ERNIE 5.5 Flash; 512000 for Dots 3 Note; 262144 for LFM3 1.7B; 256000 for
+  Glyph Cluster or North Mini Code).
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the output ceiling of the model
+  you run, so Claude Code budgets against what it can actually get. Ceilings are
+  per model — `131072` for Nemotron 3.5 Super VL, `921600` for ERNIE 5.5 Flash,
+  `16384` for any model the catalog does not describe — and a request above the
+  ceiling of the candidate actually used is clamped and logged.
+- Prompt caching is forwarded: `cache_control` breakpoints on system blocks
+  reach the Kilo gateway, which reports the hit back as `cached_tokens`, so a
+  stable system prompt is re-used instead of re-processed on every turn. The
+  markers are dropped when any fallback candidate is a different provider, since
+  a gateway that rejects unknown keys would 400 the turn.
 - Restart Claude Code (or run `claude /logout`, then `claude`) after editing.
 
 Shell-export equivalents (PowerShell, bash, zsh) are in
@@ -212,9 +218,10 @@ that; it documents each one inline.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `PROXY_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` only on a trusted network |
+| `PROXY_HOST` | `127.0.0.1` | Bind address. Non-loopback binds require `PROXY_API_KEY` (or explicit opt-in) |
 | `PROXY_PORT` | `4181` | Local listen port |
 | `PROXY_API_KEY` | unset | Shared secret clients must present. When set, required on *every* request including loopback |
+| `ALLOW_UNAUTHENTICATED_REMOTE` | `false` | Explicit opt-in to a non-loopback bind with no `PROXY_API_KEY` (trusted networks only). Fails closed |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Comma-separated browser origins. Empty disables browser access entirely |
 | `MAX_BODY_BYTES` | `20971520` (20 MB) | Max request body (larger gets `413`); also bounds a single upstream SSE line or frame |
 
@@ -235,7 +242,7 @@ that; it documents each one inline.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `DEFAULT_MODEL` | `kilo/reflection/beam-free` | Model used when the client omits one |
+| `DEFAULT_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Model used when the client omits one |
 | `FALLBACK_MODELS` | built-in list | Tried in order after a temporary upstream failure |
 | `ALLOWED_MODELS` | every `free: true` model | Explicit approval list — anything else is rejected |
 | `FREE_MODELS_ONLY` | `true` | Also reject paid models. Set `false` to allow allowlisted paid models |
@@ -276,6 +283,10 @@ receives the strongest effort it actually supports, so `xhigh`/`max` arrive as
 | `MAX_QUEUED_REQUESTS` | `20` | Requests allowed to wait for a slot. `0` disables queueing so a saturated proxy fails fast with `429` |
 | `MODEL_COOLDOWN_MS` | `30000` | How long a model is skipped after a `429`/`402`/`403`/`404`/`408`/`5xx`, or any upstream or body-read timeout |
 | `DEBUG` | `false` | Log request/response shapes with secrets and base64 redacted |
+| `EVLOG_DRAIN` | *(off)* | `file` writes one [evlog](https://www.evlog.dev/) wide event per turn as NDJSON. Console output is unchanged |
+| `EVLOG_PRETTY` | `false` | Render each turn as a styled block in the terminal, alongside the existing log lines |
+| `EVLOG_DIR` | `.evlog/logs` | Directory for the NDJSON drain, one dated file per day |
+| `EVLOG_MAX_FILES` | `14` | Dated files kept before the oldest is deleted |
 
 Booleans fail closed: a value that is not one of `1/true/yes/y/on` or
 `0/false/no/n/off` keeps the default. `FREE_MODELS_ONLY=ture` therefore leaves
@@ -290,6 +301,63 @@ cannot hold a connection open either.
 
 For troubleshooting, see [SETUP.md](./SETUP.md#troubleshooting).
 
+#### Wide events
+
+Counters answer "how many", not "what happened on that turn". With
+`EVLOG_DRAIN=file` the proxy writes one JSON object per completed turn to
+`.evlog/logs/YYYY-MM-DD.jsonl` — no traffic needed to set it up, and no change
+to what you see in the terminal (the logger runs silent and only owns the file):
+
+```json
+{"requestId":"req_8f2k","method":"POST","path":"/v1/messages",
+ "requestModel":"claude-sonnet-4-6","stream":true,
+ "routedModel":"kilo/nvidia/nemotron-3.5-lightning:free",
+ "status":200,"outcome":"complete","inputTokens":1200,"outputTokens":34,
+ "latencyMs":812,"duration":"812ms","level":"info","timestamp":"2026-11-11T15:53:32.182Z"}
+```
+
+Set `EVLOG_PRETTY=true` for the same event rendered in the terminal — it goes
+*alongside* the existing `→ stream …` / `← … complete` lines rather than
+replacing them:
+
+```
+16:05:43.422 INFO [app] POST /v1/messages 200 in 2.92s
+  ├─ requestId: req_pretty2
+  ├─ requestModel: claude-sonnet-4-6
+  ├─ stream: true
+  ├─ routedModel: kilo/nvidia/nemotron-3.5-lightning:free
+  ├─ outcome: complete
+  ├─ inputTokens: 21
+  ├─ outputTokens: 16
+  └─ latencyMs: 2917
+```
+
+The header duration is the turn, not the log call: the event is opened when the
+request arrives and emitted when it ends, so a slow free-tier turn cannot
+report itself as `1ms`.
+
+`routedModel` is read when the turn ends, so a turn served by a fallback is
+recorded against the model that actually answered. Failures are recorded too:
+`outcome` is `complete`, `error`, `timeout`, or `canceled`, with the upstream
+reason in `error`. Strings pass through the same credential redaction as `DEBUG`
+and are capped at 500 characters, so a key or a whole prompt body cannot end up
+in the file.
+
+The line is a plain object, so `jq` reads it directly:
+
+```bash
+# every turn that fell back or failed today
+jq -c 'select(.outcome != "complete") | {requestId, routedModel, outcome, error}' \
+  .evlog/logs/*.jsonl
+
+# p50 latency by routed model
+jq -r '[.routedModel, .latencyMs] | @tsv' .evlog/logs/*.jsonl \
+  | sort | awk '{a[$1]=a[$1]" "$2} END {for (m in a) print m, a[m]}'
+```
+
+Other drains (Axiom, OTLP, Sentry, `evlog/http`) are supported by the library but
+are not wired here; `src/wide.ts` is the single place to add one.
+
 ## Endpoints
 
 | Endpoint | Purpose |
@@ -297,9 +365,10 @@ For troubleshooting, see [SETUP.md](./SETUP.md#troubleshooting).
 | `POST /v1/messages` | Anthropic Messages — streaming and sync |
 | `POST /v1/messages/count_tokens` | Local token estimate (`chars/4`, minimum 1). Never touches upstream, so it is never capacity-limited |
 | `GET /health`, `/healthz` | Liveness only: `{"status":"ok"}` |
+| `GET /ready` | Readiness: a provider key is configured and the gateway answers (`ok` / `unauthorized` / `unreachable`). Returns `503` when a turn cannot succeed |
 | `GET /` | Liveness plus proxy version, upstream target, and uptime |
 | `GET /version` | Name and version |
-| `GET /v1/models` | Allowlisted + fallback + alias model ids |
+| `GET /v1/models` | Allowlisted + fallback + alias ids, each with `context_length`, `max_output_tokens`, `supports_tools`, `supports_vision`, `free` |
 | `GET /metrics` | Prometheus text format |
 | `GET /dashboard`, `/dashboard.json` | Live metrics in a browser / as JSON |
 
@@ -314,11 +383,10 @@ header does not grant access.
 
 `POST /v1/messages` is the **data plane** and is deliberately *not*
 loopback-restricted — the proxy is a single-user local adapter, and gating it
-would break every documented setup. The consequence is that binding to a
-non-loopback address without `PROXY_API_KEY` publishes an open relay on your
-upstream key. That is your call to make, so it is not blocked; it is announced
-in the startup banner, announced again on the first non-local request, and
-documented in [SECURITY.md](./SECURITY.md#network-exposure).
+would break every documented setup. To prevent an accidental open relay, the
+proxy **refuses to start** on a non-loopback bind when `PROXY_API_KEY` is unset
+unless `ALLOW_UNAUTHENTICATED_REMOTE=true` is set explicitly. Set `PROXY_API_KEY`
+whenever the bind is not loopback. See [SECURITY.md](./SECURITY.md#network-exposure).
 
 ## TLS certificates
 
@@ -380,7 +448,7 @@ reject on the next turn.
 
 ```bash
 curl http://127.0.0.1:4181/health
-bun test          # 264 unit + integration tests
+bun test          # 283 unit + integration tests
 bun run typecheck # tsc --noEmit
 bun run dev       # --watch reload
 bun run check     # format + lint + typecheck + test, as CI runs it
@@ -414,11 +482,12 @@ Layout:
 
 ## Security
 
-The proxy binds to localhost by default. Do not expose it to an untrusted
-network; if you bind beyond localhost, set `PROXY_API_KEY` and restrict network
-access. Every operational endpoint is loopback-only when `PROXY_API_KEY` is
-unset, and requires the key over any non-localhost host. Upstream error text is
-redacted before it reaches the logs or the client. Never commit `.env`.
+The proxy binds to localhost by default. A non-loopback bind without
+`PROXY_API_KEY` is refused at startup (fail-fast) unless
+`ALLOW_UNAUTHENTICATED_REMOTE=true` is explicitly set. Every operational endpoint
+is loopback-only when `PROXY_API_KEY` is unset, and requires the key over any
+non-localhost host. Upstream error text is redacted before it reaches the logs or
+the client. Never commit `.env`.
 
 Because `ALLOWED_MODELS` defaults to Kilo's free tier and `FREE_MODELS_ONLY` is
 on, the proxy will not forward a request to a paid model you have not

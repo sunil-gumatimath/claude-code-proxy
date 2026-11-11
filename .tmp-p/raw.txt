@@ -1,0 +1,8 @@
+[2m16:07:55.540[0m [36mINFO[0m [36m[app][0m [32m200[0m [2min 0ms[0m
+  [2m├─[0m [36mrequestId:[0m req_demo
+  [2m├─[0m [36mrequestModel:[0m claude-sonnet-4-6
+  [2m├─[0m [36mroutedModel:[0m kilo/nvidia/nemotron-3.5-lightning:free
+  [2m├─[0m [36moutcome:[0m complete
+  [2m├─[0m [36minputTokens:[0m 21
+  [2m├─[0m [36moutputTokens:[0m 16
+  [2m└─[0m [36mlatencyMs:[0m 2917

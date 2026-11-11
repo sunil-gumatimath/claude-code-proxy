@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { handleCountTokens, handleMessages } from "../src/handlers/messages";
+import { handleReady, resetReadyCacheForTests } from "../src/handlers/ready";
 import { resetRuntimeForTests } from "../src/runtime";
 import { createServer } from "../src/server";
 import {
@@ -93,14 +94,30 @@ describe("handleMessages — sync", () => {
 		}
 	});
 
-	test("clamps max_tokens to the documented ceiling", async () => {
+	test("clamps max_tokens to the resolved model's own budget", async () => {
 		stubUpstream(() => okBody("ok"));
 		const bodies = captureBodies();
 		await handleMessages(
-			messagesRequest(simpleBody({ max_tokens: 64_000 })),
+			messagesRequest(simpleBody({ max_tokens: 900_000 })),
 			testConfig(),
 		);
-		expect(JSON.parse(bodies[0]).max_tokens).toBe(16384);
+		// Nemotron 3.5 Super VL advertises 131,072 output tokens, not 16,384.
+		expect(JSON.parse(bodies[0]).max_tokens).toBe(131_072);
+	});
+
+	test("keeps a request that a big-output model can actually serve", async () => {
+		stubUpstream(() => okBody("ok"));
+		const bodies = captureBodies();
+		await handleMessages(
+			messagesRequest(
+				simpleBody({
+					model: "kilo/baidu/ernie-5.5-flash-preview:free",
+					max_tokens: 500_000,
+				}),
+			),
+			testConfig({ allowedModels: ["kilo/baidu/ernie-5.5-flash-preview:free"] }),
+		);
+		expect(JSON.parse(bodies[0]).max_tokens).toBe(500_000);
 	});
 
 	test("leaves max_tokens alone when it is already under the ceiling", async () => {
@@ -217,7 +234,9 @@ describe("handleMessages — fallback", () => {
 	});
 
 	test("a model in cooldown is skipped on the next request", async () => {
-		const cfg = testConfig({ fallbackModels: ["kilo/poolside/laguna-s-2.1:free"] });
+		const cfg = testConfig({
+			fallbackModels: ["kilo/nvidia/nemotron-3.5-lightning:free"],
+		});
 		// The primary 404s (retired) and the fallback answers, so only the
 		// primary is left cooling afterwards.
 		const first = stubUpstream((call) =>
@@ -235,14 +254,16 @@ describe("handleMessages — fallback", () => {
 			return okBody("x");
 		}) as unknown as typeof fetch;
 		await handleMessages(messagesRequest(simpleBody()), cfg);
-		expect(models).toEqual(["poolside/laguna-s-2.1:free"]);
+		expect(models).toEqual(["nvidia/nemotron-3.5-lightning:free"]);
 	});
 
 	test("when every candidate is cooling they are all retried anyway", async () => {
 		// Deliberate fail-open: refusing the request because every model happens
 		// to be in cooldown would be worse than trying one that may have
 		// recovered, since the cooldown may not have been earned recently.
-		const cfg = testConfig({ fallbackModels: ["kilo/poolside/laguna-s-2.1:free"] });
+		const cfg = testConfig({
+			fallbackModels: ["kilo/nvidia/nemotron-3.5-lightning:free"],
+		});
 		stubUpstream((call) =>
 			call === 1 ? textResponse("gone", 404) : okBody("ok", "chatcmpl-2"),
 		);
@@ -252,7 +273,7 @@ describe("handleMessages — fallback", () => {
 		const { getRuntime } = await import("../src/runtime");
 		const { cooldowns } = getRuntime(cfg);
 		cooldowns.fail("kilo/nvidia/nemotron-3.5-super-vl:free");
-		cooldowns.fail("kilo/poolside/laguna-s-2.1:free");
+		cooldowns.fail("kilo/nvidia/nemotron-3.5-lightning:free");
 		expect(cooldowns.isCooling("kilo/nvidia/nemotron-3.5-super-vl:free")).toBe(true);
 
 		const models: string[] = [];
@@ -522,11 +543,15 @@ describe("count_tokens", () => {
 
 	test("never returns a zero-token estimate", async () => {
 		// Claude Code divides by this figure, so 0 would be a divide-by-zero.
+		// With translated-shape estimation this may include minimal request
+		// overhead, but it must never be zero.
 		const counted = await handleCountTokens(
 			messagesRequest({}, {}, "http://127.0.0.1:4181/v1/messages/count_tokens"),
 			testConfig(),
 		);
-		expect(((await counted.json()) as { input_tokens: number }).input_tokens).toBe(1);
+		expect(
+			((await counted.json()) as { input_tokens: number }).input_tokens,
+		).toBeGreaterThanOrEqual(1);
 	});
 
 	test("rejects an oversized body and invalid JSON", async () => {
@@ -823,5 +848,307 @@ describe("createServer — routing", () => {
 		);
 		server.stop(true);
 		expect(res.headers.get("access-control-allow-origin")).toBeNull();
+	});
+});
+
+describe("createServer — unsafe remote bind guard", () => {
+	test("refuses a non-loopback bind without PROXY_API_KEY by default", () => {
+		expect(() => createServer(testConfig({ host: "0.0.0.0" }))).toThrow(
+			/Refusing to bind on 0\.0\.0\.0 without PROXY_API_KEY/,
+		);
+		expect(() => createServer(testConfig({ host: "::" }))).toThrow(/PROXY_API_KEY/);
+		expect(() => createServer(testConfig({ host: "192.168.1.50" }))).toThrow(
+			/ALLOW_UNAUTHENTICATED_REMOTE=true/,
+		);
+	});
+
+	test("allows a non-loopback bind when PROXY_API_KEY is set", () => {
+		const server = createServer(testConfig({ host: "0.0.0.0", proxyApiKey: "s3cret" }));
+		server.stop(true);
+	});
+
+	test("allows a non-loopback bind only via explicit opt-in (no key)", () => {
+		// The dangerous case is still possible, but never accidental.
+		const server = createServer(
+			testConfig({ host: "0.0.0.0", allowUnauthenticatedRemote: true }),
+		);
+		server.stop(true);
+	});
+});
+
+describe("handleMessages — additional Claude Code transcript fixtures", () => {
+	test("translates a sync tool-calling response with multiple tool calls", async () => {
+		stubUpstream(() =>
+			jsonResponse({
+				id: "chatcmpl-tools",
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: null,
+							tool_calls: [
+								{
+									id: "call_a",
+									type: "function",
+									function: { name: "Read", arguments: '{"path":"a.ts"}' },
+								},
+								{
+									id: "call_b",
+									type: "function",
+									function: { name: "Grep", arguments: '{"pattern":"x"}' },
+								},
+							],
+						},
+						finish_reason: "tool_calls",
+					},
+				],
+				usage: { prompt_tokens: 10, completion_tokens: 8 },
+			}),
+		);
+
+		const res = await handleMessages(
+			messagesRequest(
+				simpleBody({
+					tools: [
+						{ name: "Read", input_schema: { type: "object", properties: {} } },
+						{ name: "Grep", input_schema: { type: "object", properties: {} } },
+					],
+				}),
+			),
+			testConfig(),
+		);
+
+		expect(res.status).toBe(200);
+		const json = (await res.json()) as Record<string, any>;
+		expect(json.stop_reason).toBe("tool_use");
+		const toolUses = json.content.filter((b: any) => b.type === "tool_use");
+		expect(toolUses).toHaveLength(2);
+		expect(toolUses.map((t: any) => t.name).sort()).toEqual(["Grep", "Read"]);
+		expect(toolUses.find((t: any) => t.name === "Read").input).toEqual({ path: "a.ts" });
+	});
+
+	test("count_tokens reflects system, tools, and multi-turn history", async () => {
+		const base = await handleCountTokens(
+			messagesRequest(
+				{ messages: [{ role: "user", content: "hi" }] },
+				{},
+				"http://127.0.0.1:4181/v1/messages/count_tokens",
+			),
+			testConfig(),
+		);
+		const rich = await handleCountTokens(
+			messagesRequest(
+				{
+					system: "You are Claude Code.",
+					tools: [
+						{
+							name: "Read",
+							description: "Read files",
+							input_schema: {
+								type: "object",
+								properties: { path: { type: "string" } },
+								required: ["path"],
+							},
+						},
+					],
+					messages: [
+						{ role: "user", content: "Inspect the repository" },
+						{
+							role: "assistant",
+							content: [
+								{ type: "tool_use", id: "t1", name: "Read", input: { path: "a" } },
+							],
+						},
+						{
+							role: "user",
+							content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+						},
+						{ role: "user", content: "continue" },
+					],
+				},
+				{},
+				"http://127.0.0.1:4181/v1/messages/count_tokens",
+			),
+			testConfig(),
+		);
+
+		expect(base.status).toBe(200);
+		expect(rich.status).toBe(200);
+		const baseTokens = ((await base.json()) as { input_tokens: number }).input_tokens;
+		const richTokens = ((await rich.json()) as { input_tokens: number }).input_tokens;
+		expect(baseTokens).toBeGreaterThanOrEqual(1);
+		expect(richTokens).toBeGreaterThan(baseTokens);
+	});
+
+	test("streams a length-truncated response as max_tokens", async () => {
+		stubUpstream(() =>
+			sseResponse([
+				'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+				'data: {"choices":[{"delta":{},"finish_reason":"length"}],"usage":{"prompt_tokens":3,"completion_tokens":9}}\n\n',
+				"data: [DONE]\n\n",
+			]),
+		);
+
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
+		const out = await collectStream(res);
+		expect(out).toContain("partial");
+		expect(out).toContain('"stop_reason":"max_tokens"');
+		expect(out).toContain('"output_tokens":9');
+	});
+});
+
+// ── Error-text redaction ─────────────────────────────────────────────────────
+
+// SECURITY.md promises that upstream error bodies are redacted before they
+// reach the client. Only the log copy used to be passed through `redact()`,
+// so a credential-shaped string in an upstream error was forwarded verbatim.
+describe("upstream error text is redacted before it reaches the client", () => {
+	const SECRET = "sk-abcdefghijklmnop1234";
+
+	test("a non-2xx upstream body is redacted in the mirrored response", async () => {
+		stubUpstream(() =>
+			textResponse(JSON.stringify({ error: { message: `bad key ${SECRET}` } }), 500),
+		);
+		const res = await handleMessages(
+			messagesRequest(simpleBody()),
+			testConfig({ fallbackModels: [] }),
+		);
+		const body = await res.text();
+		expect(res.status).toBe(500);
+		expect(body).not.toContain(SECRET);
+		expect(body).toContain("[REDACTED]");
+	});
+
+	test("a 200-with-error body is redacted in the 502 response", async () => {
+		stubUpstream(() => jsonResponse({ error: { message: `bad key ${SECRET}` } }, 200));
+		const res = await handleMessages(
+			messagesRequest(simpleBody()),
+			testConfig({ fallbackModels: [] }),
+		);
+		const body = await res.text();
+		expect(res.status).toBe(502);
+		expect(body).not.toContain(SECRET);
+		expect(body).toContain("[REDACTED]");
+	});
+
+	test("an error frame inside a stream is redacted", async () => {
+		stubUpstream(() =>
+			sseResponse([`data: {"error":{"message":"bad key ${SECRET}"}}\n\n`]),
+		);
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig({ fallbackModels: [] }),
+		);
+		const out = await collectStream(res);
+		expect(out).not.toContain(SECRET);
+		expect(out).toContain("[REDACTED]");
+	});
+});
+
+// ── Immediate keep-alive ─────────────────────────────────────────────────────
+
+describe("handleMessages — stream keep-alive", () => {
+	test("writes an SSE comment before the first upstream byte", async () => {
+		stubUpstream(() =>
+			sseResponse([
+				'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+				"data: [DONE]\n\n",
+			]),
+		);
+		const res = await handleMessages(
+			messagesRequest(simpleBody({ stream: true })),
+			testConfig(),
+		);
+		expect(res.status).toBe(200);
+		const out = await collectStream(res);
+		expect(out.startsWith(": keep-alive")).toBe(true);
+		// A comment is dropped by the decoder, so the message itself is unchanged.
+		expect(out).toContain('"type":"message_start"');
+	});
+});
+
+// ── Readiness ────────────────────────────────────────────────────────────────
+
+describe("handleReady", () => {
+	test("is degraded when no provider key is configured", async () => {
+		resetReadyCacheForTests();
+		const res = await handleReady(testConfig({ kiloApiKey: "", qwenApiKey: "" }));
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as Record<string, any>;
+		expect(body.status).toBe("degraded");
+		expect(body.checks.upstream).toBe("skipped");
+	});
+
+	test("is ready when the gateway answers", async () => {
+		resetReadyCacheForTests();
+		globalThis.fetch = mock(
+			async () => new Response("{}", { status: 200 }),
+		) as unknown as typeof fetch;
+		const res = await handleReady(testConfig());
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as Record<string, any>).checks.upstream).toBe("ok");
+	});
+
+	test("reports a rejected credential instead of pretending to be ready", async () => {
+		resetReadyCacheForTests();
+		globalThis.fetch = mock(
+			async () => new Response("no", { status: 401 }),
+		) as unknown as typeof fetch;
+		const res = await handleReady(testConfig());
+		expect(res.status).toBe(503);
+		expect(((await res.json()) as Record<string, any>).checks.upstream).toBe(
+			"unauthorized",
+		);
+	});
+});
+
+// ── Model metadata ───────────────────────────────────────────────────────────
+
+describe("GET /v1/models", () => {
+	test("exposes capabilities and limits so a client can choose", async () => {
+		const server = createServer(testConfig());
+		const res = await server.fetch(new Request("http://127.0.0.1:4181/v1/models"));
+		const body = (await res.json()) as Record<string, any>;
+		server.stop(true);
+		const model = body.data.find(
+			(m: Record<string, any>) => m.id === "kilo/nvidia/nemotron-3.5-super-vl:free",
+		);
+		expect(model.supports_tools).toBe(true);
+		expect(model.supports_vision).toBe(true);
+		expect(model.free).toBe(true);
+		expect(model.max_output_tokens).toBe(131_072);
+		expect(model.context_length).toBe(1_000_000);
+	});
+});
+
+// ── Prompt caching ──────────────────────────────────────────────────────────
+
+describe("prompt caching passthrough", () => {
+	test("a cache breakpoint on the system prompt reaches the upstream body", async () => {
+		stubUpstream(() => okBody("ok"));
+		const bodies = captureBodies();
+		await handleMessages(
+			messagesRequest(
+				simpleBody({
+					system: [
+						{
+							type: "text",
+							text: "stable preamble",
+							cache_control: { type: "ephemeral" },
+						},
+					],
+				}),
+			),
+			testConfig(),
+		);
+		expect(JSON.parse(bodies[0]).messages[0]).toEqual({
+			role: "system",
+			content: [
+				{ type: "text", text: "stable preamble", cache_control: { type: "ephemeral" } },
+			],
+		});
 	});
 });

@@ -40,9 +40,10 @@ money is to let a request reach a model that bills per token.
   an empty `ALLOWED_MODELS` permits *all* free models, so leave it populated
   unless you mean it. Its default is derived from the `free: true` set in
   `CAPABILITIES` (`src/providers.ts`), so the two cannot drift apart.
-- An unlisted model is refused with `Model is not permitted by this free-only
-  proxy: <provider/model>`, and the message names the resolved target — so a
-  typo in a model id is visible in the error rather than silent.
+- An unlisted model is refused with `Model is not permitted: <provider/model>
+  (<reason>)`, and the message names the resolved target and why it was
+  rejected — so a typo in a model id is visible in the error rather than
+  silent.
 - **A promotional token quota is not a free tier.** QwenCloud/DashScope gives
   new accounts 70M tokens and then bills per token. `isFreeTarget` treats every
   Qwen model as paid, so a Qwen key alone cannot start billing traffic — the
@@ -74,12 +75,16 @@ money is to let a request reach a model that bills per token.
 - **`POST /v1/messages` is not loopback-restricted.** The operational endpoints
   below are, but the data plane is not: the proxy is a single-user local
   adapter, and gating the endpoint Claude Code calls would break every
-  documented setup. The consequence is that `PROXY_HOST=0.0.0.0` without
-  `PROXY_API_KEY` publishes an **unauthenticated relay on your upstream key**.
-  Set `PROXY_API_KEY` whenever the bind is not loopback. The proxy prints a
-  banner warning for any non-loopback address (including a specific interface
-  address like `192.168.1.50`, not just the wildcards) and logs again the first
-  time a non-loopback peer actually sends a request.
+  documented setup. The consequence is that a non-loopback bind without
+  `PROXY_API_KEY` would publish an **unauthenticated relay on your upstream key**.
+- **Fail-fast by default:** the proxy **refuses to start** on any non-loopback
+  bind (`0.0.0.0`, `::`, or a specific interface address like `192.168.1.50`)
+  when `PROXY_API_KEY` is unset, unless you explicitly set
+  `ALLOW_UNAUTHENTICATED_REMOTE=true` (default `false`, fail-closed). Set
+  `PROXY_API_KEY` whenever the bind is not loopback; use the opt-in only on a
+  trusted network where you accept the risk. When a non-loopback bind is
+  allowed, the proxy prints a banner warning and logs again the first time a
+  non-loopback peer actually sends a request.
 - When `PROXY_API_KEY` is unset, every **operational** endpoint (`/`,
   `/health`, `/healthz`, `/version`, `/v1/models`, `/metrics`, `/dashboard`,
   `/dashboard.json`) is restricted to loopback. The check reads the real socket
@@ -126,7 +131,9 @@ money is to let a request reach a model that bills per token.
   long base64 payloads are redacted, and `log.ts` truncates long strings — but
   this is best-effort, not a guarantee. Avoid it on shared machines.
 - Upstream error text passes through a redaction filter before it reaches the
-  logs, and error bodies returned to the client are redacted too.
+  logs, and the copy returned to the client is redacted too — including the
+  mirrored status body, a `200` that carries an error object, and an error
+  frame inside a stream.
 - Claude Code's prompts and any code you send pass through the proxy to the
   upstream provider in cleartext. That is inherent to the setup, not a bug —
   pick a provider whose data terms you accept.

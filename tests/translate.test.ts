@@ -1197,3 +1197,391 @@ describe("estimateTokens", () => {
 		expect(tokens).toBeLessThan(5000);
 	});
 });
+
+describe("translateRequest Claude Code compatibility fields", () => {
+	test("passes top_k and metadata.user_id through", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+			top_k: 40,
+			metadata: { user_id: "user_123" },
+		});
+		expect(out.top_k).toBe(40);
+		expect(out.user).toBe("user_123");
+	});
+
+	test("omits top_k/user when absent", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		expect(out.top_k).toBeUndefined();
+		expect(out.user).toBeUndefined();
+	});
+});
+
+describe("estimateTokens structural overhead", () => {
+	test("accounts for message and tool framing", () => {
+		const bare = estimateTokens({});
+		const withMessages = estimateTokens({
+			messages: [
+				{ role: "user", content: "hi" },
+				{ role: "assistant", content: "hello" },
+			],
+		});
+		const withTools = estimateTokens({
+			messages: [{ role: "user", content: "hi" }],
+			tools: [
+				{
+					type: "function",
+					function: { name: "a", description: "d", parameters: { type: "object" } },
+				},
+			],
+		});
+		expect(withMessages).toBeGreaterThan(bare);
+		expect(withTools).toBeGreaterThan(
+			estimateTokens({ messages: [{ role: "user", content: "hi" }] }),
+		);
+	});
+});
+
+describe("Claude Code-like transcript translation", () => {
+	test("translates tool loop, system, thinking budget and counts tokens coherently", () => {
+		const req = {
+			model: "claude-sonnet-4-20250514",
+			max_tokens: 4096,
+			system: "You are Claude Code, an agentic coding assistant.",
+			thinking: { type: "enabled" as const, budget_tokens: 12000 },
+			tools: [
+				{
+					name: "Read",
+					description: "Read a file",
+					input_schema: {
+						type: "object",
+						properties: { file_path: { type: "string" } },
+						required: ["file_path"],
+					},
+				},
+			],
+			messages: [
+				{ role: "user" as const, content: "Inspect src/index.ts" },
+				{
+					role: "assistant" as const,
+					content: [
+						{ type: "thinking" as const, thinking: "I should read the file." },
+						{
+							type: "tool_use" as const,
+							id: "toolu_1",
+							name: "Read",
+							input: { file_path: "src/index.ts" },
+						},
+					],
+				},
+				{
+					role: "user" as const,
+					content: [
+						{
+							type: "tool_result" as const,
+							tool_use_id: "toolu_1",
+							content: "console.log('hi')",
+						},
+					],
+				},
+			],
+		};
+
+		const out = translateRequest(req, "fallback");
+		expect(out.reasoning_effort).toBe("high");
+		expect(out.tools?.[0]).toMatchObject({
+			type: "function",
+			function: { name: "Read" },
+		});
+		expect(out.messages[0]).toEqual({
+			role: "system",
+			content: "You are Claude Code, an agentic coding assistant.",
+		});
+		expect(out.messages[1]).toEqual({ role: "user", content: "Inspect src/index.ts" });
+		expect(out.messages[2]).toMatchObject({
+			role: "assistant",
+			reasoning_content: "I should read the file.",
+			tool_calls: [{ id: "toolu_1", type: "function" }],
+		});
+		expect(out.messages[3]).toMatchObject({
+			role: "tool",
+			tool_call_id: "toolu_1",
+			content: "console.log('hi')",
+		});
+
+		const tokens = estimateTokens(out);
+		expect(tokens).toBeGreaterThan(20);
+	});
+});
+
+describe("StreamTranslator Claude Code-like tool loop fixture", () => {
+	test("streams tool call arguments across chunks and finalizes as tool_use", () => {
+		const t = new StreamTranslator("claude-sonnet", 1234);
+		const events = [
+			...t.processChunk(
+				JSON.stringify({
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{
+										index: 0,
+										id: "call_1",
+										type: "function",
+										function: { name: "Read", arguments: '{"file_' },
+									},
+								],
+							},
+							index: 0,
+						},
+					],
+				}),
+			),
+			...t.processChunk(
+				JSON.stringify({
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{ index: 0, function: { arguments: 'path":"src/index.ts"}' } },
+								],
+							},
+							index: 0,
+						},
+					],
+				}),
+			),
+			...t.processChunk(
+				JSON.stringify({
+					choices: [{ delta: {}, finish_reason: "tool_calls", index: 0 }],
+					usage: { prompt_tokens: 200, completion_tokens: 30 },
+				}),
+			),
+			...t.processChunk("[DONE]"),
+		].join("");
+
+		expect(events).toContain("message_start");
+		expect(events).toContain('"input_tokens":1234');
+		expect(events).toContain('"type":"tool_use"');
+		expect(events).toContain('"id":"call_1"');
+		expect(events).toContain('"name":"Read"');
+		expect(events).toContain("input_json_delta");
+		expect(events).toContain("src/index.ts");
+		expect(events).toContain('"stop_reason":"tool_use"');
+		expect(events).toContain('"output_tokens":30');
+		expect(events).toContain("message_stop");
+		expect(t.isFinished).toBe(true);
+	});
+});
+
+describe("translateRequest tool-result images and parallel tool calls", () => {
+	test("emits an image follow-up when a tool_result contains an image", () => {
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "toolu_img",
+							content: [
+								{ type: "text", text: "screenshot attached" },
+								{
+									type: "image",
+									source: { type: "base64", media_type: "image/png", data: "YWJj" },
+								},
+							],
+						},
+					],
+				},
+			],
+		});
+
+		expect(out.messages[0]).toMatchObject({
+			role: "tool",
+			tool_call_id: "toolu_img",
+			content: "screenshot attached",
+		});
+		expect(out.messages[1]).toEqual({
+			role: "user",
+			content: [
+				{
+					type: "image_url",
+					image_url: { url: "data:image/png;base64,YWJj" },
+				},
+			],
+		});
+	});
+});
+
+describe("StreamTranslator parallel tool calls", () => {
+	test("handles interleaved argument chunks for multiple tool calls", () => {
+		const t = new StreamTranslator("m", 10);
+		const joined = [
+			...t.processChunk(
+				JSON.stringify({
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{
+										index: 0,
+										id: "call_a",
+										type: "function",
+										function: { name: "Read", arguments: '{"path":"a' },
+									},
+									{
+										index: 1,
+										id: "call_b",
+										type: "function",
+										function: { name: "Grep", arguments: '{"q":"x' },
+									},
+								],
+							},
+						},
+					],
+				}),
+			),
+			...t.processChunk(
+				JSON.stringify({
+					choices: [
+						{
+							delta: {
+								tool_calls: [
+									{ index: 0, function: { arguments: '.ts"}' } },
+									{ index: 1, function: { arguments: '"}' } },
+								],
+							},
+						},
+					],
+				}),
+			),
+			...t.processChunk(
+				JSON.stringify({
+					choices: [{ delta: {}, finish_reason: "tool_calls" }],
+					usage: { prompt_tokens: 5, completion_tokens: 7 },
+				}),
+			),
+			...t.processChunk("[DONE]"),
+		].join("");
+
+		expect(joined).toContain('"id":"call_a"');
+		expect(joined).toContain('"name":"Read"');
+		expect(joined).toContain('"id":"call_b"');
+		expect(joined).toContain('"name":"Grep"');
+		expect(joined).toContain('{\\"path\\":\\"a');
+		expect(joined).toContain('.ts\\"}');
+		expect(joined).toContain('{\\"q\\":\\"x');
+		expect(joined).toContain('"stop_reason":"tool_use"');
+		expect(joined.match(/"type":"tool_use"/g)?.length).toBe(2);
+		expect(t.isFinished).toBe(true);
+	});
+});
+
+describe("translateRequest cache_control compatibility", () => {
+	test("preserves text from system and message blocks that include cache_control", () => {
+		const out = translateRequest({
+			model: "m",
+			system: [
+				{
+					type: "text",
+					text: "cached system",
+					cache_control: { type: "ephemeral" },
+				} as any,
+				{ type: "text", text: "more" },
+			],
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "text",
+							text: "hello",
+							cache_control: { type: "ephemeral" },
+						} as any,
+					],
+				},
+				{
+					role: "assistant",
+					content: [
+						{
+							type: "text",
+							text: "world",
+							cache_control: { type: "ephemeral" },
+						} as any,
+					],
+				},
+			],
+		});
+
+		expect(out.messages[0]).toEqual({ role: "system", content: "cached system\nmore" });
+		expect(out.messages[1]).toEqual({ role: "user", content: "hello" });
+		expect(out.messages[2]).toEqual({ role: "assistant", content: "world" });
+	});
+});
+
+describe("StreamTranslator truncation and usage fixtures", () => {
+	test("maps length finish_reason to max_tokens", () => {
+		const t = new StreamTranslator("m", 50);
+		const joined = [
+			...t.processChunk(JSON.stringify({ choices: [{ delta: { content: "partial" } }] })),
+			...t.processChunk(
+				JSON.stringify({
+					choices: [{ delta: {}, finish_reason: "length" }],
+					usage: { prompt_tokens: 50, completion_tokens: 999 },
+				}),
+			),
+			...t.processChunk("[DONE]"),
+		].join("");
+
+		expect(joined).toContain("partial");
+		expect(joined).toContain('"stop_reason":"max_tokens"');
+		expect(joined).toContain('"output_tokens":999');
+		expect(t.isFinished).toBe(true);
+	});
+});
+
+describe("prompt caching breakpoints", () => {
+	const withSystem = {
+		model: "kilo/nvidia/nemotron-3.5-super-vl:free",
+		max_tokens: 100,
+		system: [
+			{ type: "text", text: "stable preamble", cache_control: { type: "ephemeral" } },
+			{ type: "text", text: "volatile tail" },
+		],
+		messages: [{ role: "user", content: "hi" }],
+	};
+
+	test("forwards cache_control when the caller allows it", () => {
+		const out = translateRequest(withSystem as never, "m", "", { promptCaching: true });
+		expect(out.messages[0]).toEqual({
+			role: "system",
+			content: [
+				{ type: "text", text: "stable preamble", cache_control: { type: "ephemeral" } },
+				{ type: "text", text: "volatile tail" },
+			],
+		});
+	});
+
+	test("flattens the system prompt when caching is not allowed", () => {
+		const out = translateRequest(withSystem as never, "m");
+		expect(out.messages[0]).toEqual({
+			role: "system",
+			content: "stable preamble\nvolatile tail",
+		});
+	});
+
+	test("a system prompt without breakpoints stays a plain string", () => {
+		const out = translateRequest(
+			{ ...withSystem, system: [{ type: "text", text: "plain" }] } as never,
+			"m",
+			"",
+			{ promptCaching: true },
+		);
+		expect(out.messages[0]).toEqual({ role: "system", content: "plain" });
+	});
+});

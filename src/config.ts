@@ -62,7 +62,7 @@ function envStr(env: Env, key: string, fallback: string): string {
  * unqualified id to Kilo, so `ALLOWED_MODELS=my-local-model` and a request for
  * `my-local-model` both canonicalise to `kilo/my-local-model` and match.
  * Previously the entry stayed bare and never matched, which surfaced as an
- * unexplained `Model is not permitted by this free-only proxy`.
+ * unexplained "Model is not permitted" rejection.
  */
 function canonicalEntry(value: string): string {
 	return displayTarget(parseTarget(canonicalizeModelId(value)));
@@ -104,6 +104,12 @@ export interface Config {
 	maxQueuedRequests: number;
 	modelCooldownMs: number;
 	debug: boolean;
+	/** Wide-event output (evlog): "file" writes NDJSON under evlogDir; "" is off. */
+	evlogDrain: "file" | "";
+	evlogDir: string;
+	evlogMaxFiles: number;
+	/** Render each wide event as a styled block in the terminal instead of silence. */
+	evlogPretty: boolean;
 	/** Upstream fetch timeout (ms), also used as the per-read SSE stream deadline. */
 	upstreamTimeoutMs: number;
 	/** Verify the TLS certificate supplied by the upstream (keep enabled normally). */
@@ -113,45 +119,55 @@ export interface Config {
 	maxBodyBytes: number;
 	/** Comma-separated browser origins permitted to call this proxy. */
 	corsAllowedOrigins: string[];
+	/**
+	 * Explicit opt-in to the one dangerous configuration: a non-loopback bind
+	 * with no PROXY_API_KEY. Default false (fail-closed) so an accidental
+	 * PROXY_HOST=0.0.0.0 cannot publish an unauthenticated relay on your
+	 * upstream key.
+	 */
+	allowUnauthenticatedRemote: boolean;
 }
 
 /**
- * Default failover chain: strongest free model first, routers last.
+ * Default failover chain: every free model *except* the primary, strongest
+ * first, routers last.
  *
- * Ordering rationale — every entry must support tool calling, and the head of
- * the list carries the largest context/output budgets because Claude Code
- * sends big prompts and large file rewrites:
+ * `DEFAULT_MODEL` is the best free coder and is deliberately absent here, so a
+ * fallback is only reached when the primary actually failed rather than
+ * re-trying the same model under a second name. Ordering rationale — every
+ * entry must support tool calling, and the head of the list carries the
+ * largest context/output budgets because Claude Code sends big prompts and
+ * large file rewrites (verified against the live Kilo catalog 2026-11-11,
+ * using the gateway's own `isFree` flag):
  *
- *   1. Nemotron 3.5 Super VL  1M ctx, 131K out, vision+video
- *   2. Beam 1.0 (free)        1M ctx, 131K out, reasoning/coding
- *   3. Glyph Cluster          256K ctx, 256K out, frontier stealth model
- *   4. Nemotron 3 Ultra       1M ctx, 550B MoE
- *   5. Flint v1.0             262K ctx, 236K out, built for coding agents
- *   6. North Mini Code        256K ctx, code-specialised
- *   7. Dots 3 Note            512K ctx, vision (expires 2026-12-31)
- *   8. Nemotron 3.5 Lightning 1M ctx, fast (the `haiku` alias target)
- *   9. Xing4.0                262K ctx, 29B MoE
- *  10. Nemotron Nano Omni     256K ctx, omni
- *  11. OpenRouter Free        router — resolves server-side
- *  12. Auto Free              router — kept last, resolves to a smaller model
+ *   primary  Nemotron 3.5 Super VL  1M ctx, 131K out, vision+video, Code #6
+ *   1. ERNIE 5.5 Flash        1M ctx, 921K out, the largest free output budget
+ *   2. Glyph Cluster          256K ctx, 256K out, stealth coding/reasoning
+ *   3. Inkling 2 Small        1.05M ctx, 131K out, text+image reasoning
+ *   4. Nemotron 3 Ultra       1M ctx, 65K out, 550B MoE (`opus` alias target)
+ *   5. Nemotron 3.5 Lightning 1M ctx, 65K out, fast (`haiku` alias target)
+ *   6. North Mini Code        256K ctx, 64K out, code-specialised
+ *   7. Dots 3 Note            512K ctx, 460K out, vision
+ *   8. Nemotron Nano Omni     256K ctx, 65K out, omni (text/image/audio/video)
+ *   9. LFM3 1.7B              262K ctx, 8K out, compact/agent-capable
+ *  10. OpenRouter Free        router — resolves server-side
+ *  11. Auto Free              router — kept last, resolves to a smaller model
  *
- * Retired and expiring ids are deliberately absent: `nemotron-3-super-120b-a12b`
- * left the catalog on 2026-10-27, and both Laguna models expire 2026-10-31.
- * They stay in the capability table so an explicit ALLOWED_MODELS entry still
- * gets correct tool/vision flags, but a default chain should not be built on
- * models with a known end date.
+ * The free tier rotates — Beam and Crouton Alpha were retired during 2026-11
+ * and this list led with Beam. Re-check GET {KILO_BASE_URL}/models (its
+ * `isFree` flag is authoritative) and update the CAPABILITIES table in
+ * providers.ts (the default allowlist follows it).
  */
 const DEFAULT_FALLBACK_MODELS = [
-	"kilo/nvidia/nemotron-3.5-super-vl:free",
-	"kilo/reflection/beam-free",
+	"kilo/baidu/ernie-5.5-flash-preview:free",
 	"kilo/stealth/glyph-cluster",
+	"kilo/thinkingmachines/inkling-2-small:free",
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
-	"kilo/recursive/flint-v1.0:free",
+	"kilo/nvidia/nemotron-3.5-lightning:free",
 	"kilo/cohere/north-mini-code:free",
 	"kilo/dots-studio/dots-3-note-preview:free",
-	"kilo/nvidia/nemotron-3.5-lightning:free",
-	"kilo/xingchen-agi/xing4.0-29b-a4b:free",
 	"kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+	"kilo/liquid/lfm-3-1.7b:free",
 	"kilo/openrouter/free",
 	"kilo/kilo-auto/free",
 ].join(",");
@@ -192,7 +208,7 @@ export function loadConfig(env: Env = Bun.env): Config {
 		// Preserve Claude Code's requested model name unless the gateway requires a prefix.
 		modelPrefix: envStr(env, "MODEL_PREFIX", ""),
 		defaultModel: canonicalEntry(
-			envStr(env, "DEFAULT_MODEL", "kilo/reflection/beam-free"),
+			envStr(env, "DEFAULT_MODEL", "kilo/nvidia/nemotron-3.5-super-vl:free"),
 		),
 		fallbackModels: envList(env, "FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS),
 		allowedModels: envList(env, "ALLOWED_MODELS", defaultAllowedModels()),
@@ -202,7 +218,7 @@ export function loadConfig(env: Env = Bun.env): Config {
 		),
 		modelAliases: parseAliases(
 			env.MODEL_ALIASES ??
-				"*haiku*=kilo/nvidia/nemotron-3.5-lightning:free,*sonnet*=kilo/reflection/beam-free,*opus*=kilo/reflection/beam-free",
+				"*haiku*=kilo/nvidia/nemotron-3.5-lightning:free,*sonnet*=kilo/nvidia/nemotron-3.5-super-vl:free,*opus*=kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 		),
 		reasoningEffort: parseReasoningEffort(env.REASONING_EFFORT ?? ""),
 		smartRouting: envBool(env, "SMART_ROUTING", true),
@@ -212,6 +228,10 @@ export function loadConfig(env: Env = Bun.env): Config {
 		maxQueuedRequests: envInt(env, "MAX_QUEUED_REQUESTS", 20, 0),
 		modelCooldownMs: envInt(env, "MODEL_COOLDOWN_MS", 30_000, 0),
 		debug: envBool(env, "DEBUG", false),
+		evlogDrain: parseEvlogDrain(env.EVLOG_DRAIN),
+		evlogDir: envStr(env, "EVLOG_DIR", ".evlog/logs"),
+		evlogMaxFiles: envInt(env, "EVLOG_MAX_FILES", 14),
+		evlogPretty: envBool(env, "EVLOG_PRETTY", false),
 		upstreamTimeoutMs: envInt(env, "UPSTREAM_TIMEOUT_MS", 120_000),
 		upstreamTlsRejectUnauthorized: envBool(env, "UPSTREAM_TLS_REJECT_UNAUTHORIZED", true),
 		upstreamCaFile: envStr(env, "UPSTREAM_CA_FILE", ""),
@@ -220,7 +240,18 @@ export function loadConfig(env: Env = Bun.env): Config {
 			.split(",")
 			.map((origin) => origin.trim())
 			.filter(Boolean),
+		allowUnauthenticatedRemote: envBool(env, "ALLOW_UNAUTHENTICATED_REMOTE", false),
 	};
+}
+
+/**
+ * Wide-event drain selector. Deliberately narrow: only `file` is implemented,
+ * and anything unrecognised stays off rather than guessing a destination for
+ * request metadata the operator did not ask to persist.
+ */
+export function parseEvlogDrain(raw: string | undefined): "file" | "" {
+	const v = (raw ?? "").trim().toLowerCase();
+	return v === "file" || v === "fs" ? "file" : "";
 }
 
 const REASONING_EFFORTS: Record<string, true> = {

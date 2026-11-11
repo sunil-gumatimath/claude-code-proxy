@@ -7,9 +7,12 @@ import { isAuthorized } from "./auth";
 import { type Config, isLoopbackHost } from "./config";
 import { anthropicError } from "./errors";
 import { handleCountTokens, handleMessages } from "./handlers/messages";
+import { handleReady } from "./handlers/ready";
 import { banner, colors, log, setDebug, warn } from "./log";
+import { getCapabilities, maxOutputTokens, parseTarget } from "./providers";
 import { getMetrics, prometheusMetrics } from "./runtime";
 import { NAME, VERSION } from "./version";
+import { initWideEvents } from "./wide";
 
 const { cyan, green, dim, bold, yellow, red } = colors;
 
@@ -40,6 +43,8 @@ interface Route {
 
 export function createServer(config: Config): Server<unknown> {
 	setDebug(config.debug);
+	initWideEvents(config);
+	assertSafeBind(config);
 
 	const routes: Route[] = [
 		{
@@ -69,6 +74,15 @@ export function createServer(config: Config): Server<unknown> {
 			handler: () => Response.json({ name: NAME, version: VERSION }),
 		},
 		{
+			// Readiness, not liveness: 503 when no key is configured or the
+			// gateway cannot be reached, which `/health` would happily call ok.
+			method: "GET",
+			path: "/ready",
+			operational: true,
+			cors: true,
+			handler: (_req, cfg) => handleReady(cfg),
+		},
+		{
 			method: "GET",
 			path: "/v1/models",
 			operational: true,
@@ -82,12 +96,23 @@ export function createServer(config: Config): Server<unknown> {
 							...cfg.fallbackModels,
 							...cfg.modelAliases.map((alias) => alias.model),
 						]),
-					].map((id) => ({
-						id,
-						object: "model",
-						created: MODELS_CREATED_AT,
-						owned_by: NAME,
-					})),
+					].map((id) => {
+						// Expose what the proxy already knows about each id, so a client
+						// can pick sensibly instead of discovering 400s at request time.
+						const target = parseTarget(id);
+						const caps = getCapabilities(target);
+						return {
+							id,
+							object: "model",
+							created: MODELS_CREATED_AT,
+							owned_by: NAME,
+							context_length: caps.contextLength ?? null,
+							max_output_tokens: maxOutputTokens(target),
+							supports_tools: caps.tools,
+							supports_vision: caps.vision,
+							free: caps.free,
+						};
+					}),
 				}),
 		},
 		{
@@ -229,6 +254,7 @@ export function createServer(config: Config): Server<unknown> {
 
 	printBanner(config);
 	warnOnNonLoopbackBind(config);
+	warnOnUnusableDefault(config);
 	setupGracefulShutdown(server);
 
 	return server;
@@ -317,20 +343,28 @@ function withCors(res: Response, req: Request, config: Config): Response {
 // ── Startup diagnostics ──────────────────────────────────────────────────────
 
 /**
- * Announce the one genuinely sharp edge, on any non-loopback bind.
+ * Refuse the only genuinely dangerous default: a non-loopback bind with no
+ * PROXY_API_KEY. POST /v1/messages is the data plane and is intentionally not
+ * loopback-restricted (single-user local adapter UX), so binding it beyond
+ * localhost without a key would publish an unauthenticated relay on the
+ * operator's upstream key. The unsafe case is still possible, but only via an
+ * explicit opt-in: ALLOW_UNAUTHENTICATED_REMOTE=true.
  *
- * Operational endpoints are loopback-gated, which can create a false sense of
- * "everything here is protected" — but `POST /v1/messages` is the data plane
- * and is deliberately reachable from anywhere the socket accepts, because the
- * proxy is documented as a single-user local adapter. Binding it to a
- * non-loopback address therefore publishes an unauthenticated relay that spends
- * the operator's upstream key. That is the operator's call, so it is not
- * blocked here — but it is announced at startup, and again the first time a
- * non-loopback peer actually uses it.
- *
- * This covers a specific interface address (PROXY_HOST=192.168.1.50) as well as
- * the wildcards, which the previous `host === "0.0.0.0"` check let through
- * silently.
+ * Runs before Bun.serve() binds the port.
+ */
+function assertSafeBind(config: Config): void {
+	if (isLoopbackHost(config.host)) return;
+	if (config.proxyApiKey || config.allowUnauthenticatedRemote) return;
+	throw new Error(
+		`Refusing to bind on ${config.host} without PROXY_API_KEY: POST /v1/messages would be reachable without authentication and could spend your upstream key. ` +
+			"Set PROXY_API_KEY, or set ALLOW_UNAUTHENTICATED_REMOTE=true only on a trusted network where you accept that risk.",
+	);
+}
+
+/**
+ * Announce a non-loopback bind. The unauthenticated case is unreachable here
+ * unless the operator explicitly opted in (assertSafeBind enforces that), but
+ * the warning still applies: the data plane is reachable from other machines.
  */
 function warnOnNonLoopbackBind(config: Config): void {
 	if (isLoopbackHost(config.host)) return;
@@ -339,9 +373,21 @@ function warnOnNonLoopbackBind(config: Config): void {
 	);
 	if (!config.proxyApiKey) {
 		warn(
-			"PROXY_API_KEY is not set: anyone who can reach this port can spend your upstream key. Set it before exposing this beyond a trusted network.",
+			"ALLOW_UNAUTHENTICATED_REMOTE=true with no PROXY_API_KEY: POST /v1/messages is reachable without authentication. Use only on a trusted network.",
 		);
 	}
+}
+
+/**
+ * Warn when the primary can never be served. Without this the failure only
+ * surfaces at the first request as "Model is not permitted", which reads like a
+ * client bug rather than a stale `.env`.
+ */
+function warnOnUnusableDefault(config: Config): void {
+	if (config.allowedModels.includes(config.defaultModel)) return;
+	warn(
+		`DEFAULT_MODEL ${config.defaultModel} is not in ALLOWED_MODELS: any request that omits a model will be rejected. Add it to ALLOWED_MODELS or change DEFAULT_MODEL.`,
+	);
 }
 
 let remoteUseAnnounced = false;
@@ -357,18 +403,23 @@ function announceRemoteUse(socketIp: string | undefined): void {
 
 function printBanner(config: Config) {
 	const exposed = !isLoopbackHost(config.host);
+	const defaultAllowed = config.allowedModels.includes(config.defaultModel);
 	banner([
 		bold(`  ⚡ ${NAME} v${VERSION}`),
 		"",
 		`  ${dim("Listen:")}        ${cyan(`http://${config.host}:${config.port}`)}`,
 		`  ${dim("Target:")}        ${cyan(config.kiloBaseUrl)}`,
 		`  ${dim("Model prefix:")}  ${cyan(`"${config.modelPrefix}"`)}`,
+		`  ${dim("Default:")}       ${cyan(config.defaultModel)} ${
+			defaultAllowed ? green("✓ allowlisted") : red("✗ NOT allowlisted")
+		}`,
 		`  ${dim("API key:")}       ${
 			config.kiloApiKey ? green("✓ from KILO_API_KEY") : dim("⚠ from request headers")
 		}`,
 		`  ${dim("Upstream TO:")}   ${cyan(`${config.upstreamTimeoutMs}ms`)}`,
 		`  ${dim("Max body:")}      ${cyan(formatBytes(config.maxBodyBytes))}`,
 		`  ${dim("Debug:")}         ${config.debug ? green("ON") : dim("off")}`,
+		`  ${dim("Wide events:")}   ${wideEventStatus(config)}`,
 		"",
 		exposed
 			? `  ${yellow("⚠ Non-loopback bind")} — POST /v1/messages is reachable from the network${
@@ -377,6 +428,15 @@ function printBanner(config: Config) {
 			: `  ${dim("Bound localhost-only (set PROXY_HOST=0.0.0.0 to change)")}`,
 		`  ${green("Ready")} → http://${exposed ? "localhost" : config.host}:${config.port}/v1/messages`,
 	]);
+}
+
+/** Banner text for the two independent wide-event switches. */
+function wideEventStatus(config: Config): string {
+	const sinks = [
+		config.evlogDrain === "file" ? `file → ${config.evlogDir}` : "",
+		config.evlogPretty ? "terminal" : "",
+	].filter(Boolean);
+	return sinks.length ? green(sinks.join(" + ")) : dim("off");
 }
 
 function formatBytes(n: number): string {

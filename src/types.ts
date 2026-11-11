@@ -78,11 +78,13 @@ export interface AnthropicMessagesRequest {
 	max_tokens?: number;
 	temperature?: number;
 	top_p?: number;
+	top_k?: number;
 	stop_sequences?: string[];
 	stream?: boolean;
 	tools?: AnthropicTool[];
 	tool_choice?: AnthropicToolChoice;
 	thinking?: { type: "enabled" | "disabled"; budget_tokens?: number };
+	metadata?: { user_id?: string; [key: string]: unknown };
 	[key: string]: unknown;
 }
 
@@ -129,6 +131,7 @@ export interface OpenAIChatRequest {
 	max_tokens?: number;
 	temperature?: number;
 	top_p?: number;
+	top_k?: number;
 	stop?: string[];
 	stream?: boolean;
 	stream_options?: { include_usage?: boolean };
@@ -136,6 +139,8 @@ export interface OpenAIChatRequest {
 	tool_choice?: unknown;
 	parallel_tool_calls?: boolean;
 	reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | "no_think";
+	/** Best-effort passthrough for upstreams that support end-user attribution. */
+	user?: string;
 }
 
 /** OpenAI reasoning-effort values; "" = derive from the thinking budget. */

@@ -17,6 +17,7 @@ build/
 # Logs
 *.log
 logs/
+.evlog/
 
 # OS
 .DS_Store
@@ -42,3 +43,6 @@ coverage/
 # Pi coding agent artifacts
 .pi/
 nul
+
+# local backups of secrets must never be committed
+.env.bak-*

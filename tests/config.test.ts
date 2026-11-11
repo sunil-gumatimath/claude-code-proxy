@@ -31,6 +31,16 @@ describe("loadConfig defaults", () => {
 		}
 	});
 
+	test("the primary is the best free model and is not duplicated in the chain", () => {
+		// The chain holds everything *except* the primary, so a fallback is only
+		// reached when DEFAULT_MODEL actually failed rather than retrying the same
+		// model under a second entry.
+		const cfg = loadConfig({});
+		expect(cfg.defaultModel).toBe("kilo/nvidia/nemotron-3.5-super-vl:free");
+		expect(cfg.fallbackModels).not.toContain(cfg.defaultModel);
+		expect(cfg.fallbackModels).toHaveLength(freeModelIds().length - 1);
+	});
+
 	test("the free-only gate is on and the allowlist is populated by default", () => {
 		const cfg = loadConfig({});
 		expect(cfg.freeModelsOnly).toBe(true);
@@ -52,7 +62,7 @@ describe("loadConfig defaults", () => {
 	// A bare configured id must canonicalise the same way a bare *request* does.
 	// Routing resolves an unqualified name to Kilo, so an allowlist entry left
 	// bare would never match the target it was meant to approve — which surfaced
-	// as an unexplained "Model is not permitted by this free-only proxy".
+	// as an unexplained "Model is not permitted" rejection.
 	test("a bare allowlist entry resolves to the kilo/ form the gate compares", () => {
 		const cfg = loadConfig({ ALLOWED_MODELS: "my-local-model" });
 		expect(cfg.allowedModels).toEqual(["kilo/my-local-model"]);
@@ -155,6 +165,20 @@ describe("envInt / envBool semantics", () => {
 			loadConfig({ UPSTREAM_TLS_REJECT_UNAUTHORIZED: "maybe" })
 				.upstreamTlsRejectUnauthorized,
 		).toBe(true);
+		// Allowing an unauthenticated non-loopback bind is dangerous, so its
+		// default is false and an unrecognised value must keep it false.
+		expect(loadConfig({}).allowUnauthenticatedRemote).toBe(false);
+		expect(
+			loadConfig({ ALLOW_UNAUTHENTICATED_REMOTE: "true" }).allowUnauthenticatedRemote,
+		).toBe(true);
+		expect(
+			loadConfig({ ALLOW_UNAUTHENTICATED_REMOTE: "1" }).allowUnauthenticatedRemote,
+		).toBe(true);
+		for (const typo of ["ture", "flase", "yes please", "2"]) {
+			expect(
+				loadConfig({ ALLOW_UNAUTHENTICATED_REMOTE: typo }).allowUnauthenticatedRemote,
+			).toBe(false);
+		}
 	});
 
 	test("REASONING_EFFORT only accepts a known value, else it is cleared", () => {

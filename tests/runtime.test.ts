@@ -1,12 +1,21 @@
 import { describe, expect, test } from "bun:test";
-import { canFallback, isAbortError, isTransientStatus } from "../src/handlers/upstream";
+import {
+	canFallback,
+	isAbortError,
+	isTransientStatus,
+	retryAfterMs,
+} from "../src/handlers/upstream";
 import {
 	getMetrics,
 	getRuntime,
+	healthPenalty,
 	ModelCooldowns,
+	modelHealthPenalty,
 	prometheusMetrics,
 	RequestLimiter,
+	recordModelFailure,
 	recordModelRequest,
+	recordModelSuccess,
 	recordUpstreamError,
 	resetRuntimeForTests,
 } from "../src/runtime";
@@ -193,12 +202,40 @@ describe("ModelCooldowns", () => {
 		expect(cooldowns.isCooling("kilo/a")).toBe(false);
 	});
 
+	test("honors an explicit cooldown hint", async () => {
+		const cooldowns = new ModelCooldowns(10_000);
+		cooldowns.fail("kilo/a", 15);
+		expect(cooldowns.isCooling("kilo/a")).toBe(true);
+		await Bun.sleep(25);
+		expect(cooldowns.isCooling("kilo/a")).toBe(false);
+	});
+
 	test("the table is bounded and evicts the soonest expiry", () => {
 		const cooldowns = new ModelCooldowns(10_000);
 		for (let i = 0; i < 150; i++) cooldowns.fail(`kilo/model-${i}`);
 		// Still functional after eviction, and the earliest entry is the one gone.
 		expect(cooldowns.isCooling("kilo/model-0")).toBe(false);
 		expect(cooldowns.isCooling("kilo/model-149")).toBe(true);
+	});
+});
+
+describe("retryAfterMs", () => {
+	test("parses delay-seconds and clamps", () => {
+		expect(retryAfterMs("2")).toBe(2000);
+		expect(retryAfterMs("0")).toBe(0);
+		expect(retryAfterMs("99999")).toBe(300_000);
+	});
+
+	test("parses HTTP-date relative to now", () => {
+		const now = Date.parse("2026-01-01T00:00:00Z");
+		expect(retryAfterMs("Thu, 01 Jan 2026 00:00:03 GMT", now)).toBe(3000);
+		expect(retryAfterMs("Thu, 01 Jan 2026 00:00:00 GMT", now)).toBe(0);
+	});
+
+	test("returns undefined for missing or invalid values", () => {
+		expect(retryAfterMs(null)).toBeUndefined();
+		expect(retryAfterMs("")).toBeUndefined();
+		expect(retryAfterMs("wat")).toBeUndefined();
 	});
 });
 
@@ -223,11 +260,51 @@ describe("getRuntime", () => {
 	});
 });
 
+// ── Health ranking ───────────────────────────────────────────────────────────
+
+describe("healthPenalty", () => {
+	test("failures cost more than speed, and both are ordered correctly", () => {
+		const clean = healthPenalty({ failures: 0, successes: 2, latencyMs: 500 });
+		const flaky = healthPenalty({ failures: 2, successes: 2, latencyMs: 500 });
+		const slow = healthPenalty({ failures: 0, successes: 2, latencyMs: 8000 });
+		expect(flaky).toBeGreaterThan(clean);
+		expect(slow).toBeGreaterThan(clean);
+	});
+
+	test("an old failure counts for less than a fresh one", () => {
+		// Regression: the penalty was cumulative for the process lifetime, so a
+		// model that had one bad minute stayed ranked last long after recovering.
+		const fresh = healthPenalty({ failures: 3, successes: 0, latencyMs: 0, ageMs: 0 });
+		const aged = healthPenalty({
+			failures: 3,
+			successes: 0,
+			latencyMs: 0,
+			ageMs: 10 * 60_000,
+		});
+		const stale = healthPenalty({
+			failures: 3,
+			successes: 0,
+			latencyMs: 0,
+			ageMs: 24 * 60 * 60_000,
+		});
+		expect(aged).toBeLessThan(fresh);
+		expect(aged).toBeGreaterThan(0);
+		expect(stale).toBeLessThan(0.1);
+	});
+
+	test("a recorded failure immediately raises that model's penalty", () => {
+		recordModelFailure("kilo/decay-probe");
+		expect(modelHealthPenalty("kilo/decay-probe")).toBeGreaterThan(0);
+	});
+});
+
 // ── Metrics ──────────────────────────────────────────────────────────────────
 
 describe("prometheusMetrics", () => {
 	test("exports the saturation and latency series operators are told to watch", () => {
 		recordModelRequest("kilo/nvidia/nemotron-3.5-super-vl:free");
+		recordModelSuccess("kilo/nvidia/nemotron-3.5-super-vl:free");
+		recordModelFailure("kilo/nvidia/nemotron-3.5-super-vl:free");
 		recordUpstreamError(429);
 		const out = prometheusMetrics();
 		for (const name of [
@@ -236,10 +313,14 @@ describe("prometheusMetrics", () => {
 			"kilo_proxy_streams_active",
 			"kilo_proxy_queued_requests",
 			"kilo_proxy_fallbacks_total",
+			"kilo_proxy_stream_retries_total",
 			"kilo_proxy_upstream_errors_total",
+			"kilo_proxy_upstream_timeouts_total",
 			"kilo_proxy_rate_limits_total",
 			"kilo_proxy_request_duration_ms_sum",
 			"kilo_proxy_request_duration_ms_count",
+			"kilo_proxy_model_successes_total",
+			"kilo_proxy_model_failures_total",
 		]) {
 			expect(out).toContain(name);
 		}

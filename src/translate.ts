@@ -4,6 +4,7 @@
 
 import { createHash } from "node:crypto";
 import { anthropicErrorSse, extractErrorMessage, truncate } from "./errors";
+import { redact } from "./log";
 import type {
 	AnthropicContentBlock,
 	AnthropicMessage,
@@ -20,10 +21,21 @@ import type {
 
 // ─── Request Translation (Anthropic → OpenAI) ──────────────────────────────
 
+export interface TranslateOptions {
+	/**
+	 * Forward Anthropic `cache_control` breakpoints on system blocks. The caller
+	 * decides, because the field is only safe when every candidate upstream
+	 * accepts it — a marker reaching a gateway that rejects unknown keys would
+	 * 400 the whole turn.
+	 */
+	promptCaching?: boolean;
+}
+
 export function translateRequest(
 	body: AnthropicMessagesRequest,
 	defaultModel = "claude-sonnet-4-20250514",
 	reasoningEffort: ReasoningEffort = "",
+	options: TranslateOptions = {},
 ): OpenAIChatRequest {
 	const openai: OpenAIChatRequest = {
 		model: "",
@@ -40,11 +52,21 @@ export function translateRequest(
 		if (typeof body.system === "string") {
 			messages.push({ role: "system", content: body.system });
 		} else if (Array.isArray(body.system)) {
-			const text = body.system
-				.filter((b) => b.type === "text")
-				.map((b) => b.text)
-				.join("\n");
-			if (text) messages.push({ role: "system", content: text });
+			// A stable system prompt is the largest static prefix in a Claude Code
+			// session. Forwarding the client's breakpoints lets the gateway re-use
+			// it (`cached_tokens` in usage) instead of re-processing it every turn.
+			const cached = options.promptCaching
+				? cacheableSystemParts(body.system)
+				: undefined;
+			if (cached) {
+				messages.push({ role: "system", content: cached });
+			} else {
+				const text = body.system
+					.filter((b) => b.type === "text")
+					.map((b) => b.text)
+					.join("\n");
+				if (text) messages.push({ role: "system", content: text });
+			}
 		}
 	}
 
@@ -55,12 +77,17 @@ export function translateRequest(
 	openai.messages = messages;
 
 	if (body.max_tokens != null) {
-		openai.max_tokens = Math.min(body.max_tokens, 16384);
+		// Passed through unclamped: the ceiling depends on the model the request
+		// actually lands on, and that is not known until routing has run. The
+		// per-candidate clamp lives in callUpstream.
+		openai.max_tokens = body.max_tokens;
 	}
 	if (body.temperature != null) openai.temperature = body.temperature;
 	if (body.top_p != null) openai.top_p = body.top_p;
+	if (body.top_k != null) openai.top_k = body.top_k;
 	if (body.stop_sequences) openai.stop = body.stop_sequences;
 	if (body.stream != null) openai.stream = body.stream;
+	if (body.metadata?.user_id) openai.user = String(body.metadata.user_id);
 
 	if (body.stream) {
 		openai.stream_options = { include_usage: true };
@@ -115,6 +142,30 @@ export function translateRequest(
 	}
 
 	return openai;
+}
+
+/**
+ * System blocks as OpenAI content parts, preserving `cache_control` markers.
+ * Returns undefined when the client marked nothing, so an ordinary prompt keeps
+ * the simpler string shape.
+ */
+function cacheableSystemParts(blocks: readonly unknown[]): unknown[] | undefined {
+	const parts: Array<{ type: "text"; text: string; cache_control?: unknown }> = [];
+	let sawBreakpoint = false;
+	for (const raw of blocks) {
+		const block = raw as { type?: string; text?: unknown; cache_control?: unknown };
+		if (block.type !== "text" || typeof block.text !== "string") continue;
+		const part: { type: "text"; text: string; cache_control?: unknown } = {
+			type: "text",
+			text: block.text,
+		};
+		if (block.cache_control) {
+			part.cache_control = block.cache_control;
+			sawBreakpoint = true;
+		}
+		parts.push(part);
+	}
+	return sawBreakpoint && parts.length ? parts : undefined;
 }
 
 function translateMessage(
@@ -461,6 +512,16 @@ export class StreamTranslator {
 	}
 
 	/**
+	 * Token counts as they stand now. `inputTokens` starts as the local estimate
+	 * and is replaced by the upstream's real prompt usage when the final chunk
+	 * carries it; `outputTokens` is only known at the end. Read by the wide
+	 * event on completion.
+	 */
+	get usage(): { inputTokens: number; outputTokens: number } {
+		return { inputTokens: this.inputTokens, outputTokens: this.outputTokens };
+	}
+
+	/**
 	 * Process one SSE data payload from the OpenAI stream.
 	 * Returns Anthropic SSE event strings ready to write.
 	 */
@@ -496,7 +557,7 @@ export class StreamTranslator {
 			const errMsg = extractErrorMessage(maybeError, "Upstream stream error");
 			this.finished = true;
 			this.errorFrame = true;
-			return [anthropicErrorSse("api_error", truncate(errMsg, 2000))];
+			return [anthropicErrorSse("api_error", truncate(redact(errMsg), 2000))];
 		}
 
 		const events: string[] = [];
@@ -841,22 +902,47 @@ function thinkingSignature(thinking: string): string {
 }
 
 /**
- * Cheap prompt-size estimate (chars/4), matching the heuristic `count_tokens`
- * uses. Measured against the translated upstream request so it covers what is
- * actually sent, tool schemas included — it is an approximation for the
- * client's context meter, not a billing figure.
+ * Cheap prompt-size estimate for `count_tokens` and stream message_start.
+ * Measured against the translated upstream request so it covers what is
+ * actually sent (messages, system, tools) — an approximation for the client's
+ * context meter, not a billing figure.
  *
- * An encoded image or document is charged a flat budget instead of its payload
- * length: one screenshot is a few thousand characters of base64 per pixel and
- * counting them verbatim would report hundreds of thousands of tokens for a
- * single image, making the client compact far too early.
+ * Uses chars/4 plus lightweight structural overhead, and charges
+ * encoded images/documents a flat budget instead of raw base64 length so a
+ * single attachment does not wildly skew compaction.
  */
 export function estimateTokens(value: unknown): number {
-	return Math.max(1, Math.ceil(countEstimateChars(value) / 4));
+	const chars = countEstimateChars(value);
+	const overhead = estimateStructuralOverhead(value);
+	// Heuristic calibration: chars/4 under-counts JSON punctuation/structure and
+	// non-ASCII for common Claude Code payloads; apply a mild uplift plus overhead.
+	return Math.max(1, Math.ceil((chars / 4) * 1.08) + overhead);
 }
 
 /** Characters an attachment is charged, roughly 1500 tokens. */
 const ATTACHMENT_TOKEN_BUDGET = 6000;
+
+function estimateStructuralOverhead(value: unknown): number {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+	const v = value as {
+		messages?: unknown;
+		tools?: unknown;
+		system?: unknown;
+	};
+	let overhead = 6; // request/object framing
+	if (typeof v.system === "string" && v.system) overhead += 6;
+	if (Array.isArray(v.messages)) {
+		for (const msg of v.messages) {
+			overhead += 6; // role/content framing
+			const m = msg as { role?: unknown; tool_calls?: unknown; content?: unknown } | null;
+			if (m?.role === "assistant") overhead += 1;
+			if (m && Array.isArray(m.tool_calls)) overhead += m.tool_calls.length * 5;
+			if (m && Array.isArray(m.content)) overhead += Math.ceil(m.content.length * 1.5);
+		}
+	}
+	if (Array.isArray(v.tools)) overhead += v.tools.length * 8;
+	return overhead;
+}
 
 function countEstimateChars(value: unknown): number {
 	if (typeof value === "string") return value.length;

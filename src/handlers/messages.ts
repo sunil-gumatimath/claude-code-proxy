@@ -7,18 +7,26 @@ import type { Config } from "../config";
 import { anthropicError, extractErrorMessage, rateLimited, truncate } from "../errors";
 import { colors, debug, error, log, redact } from "../log";
 import { displayTarget, qualifyModel } from "../providers";
-import { buildCandidateTargets, isTargetAllowed, resolveTarget } from "../routing";
-import { beginRequest, getRuntime, recordUpstreamError } from "../runtime";
+import {
+	buildCandidateTargets,
+	diagnoseNoCandidates,
+	explainAllowlistRejection,
+	resolveTarget,
+} from "../routing";
+import {
+	beginRequest,
+	getRuntime,
+	recordUpstreamError,
+	recordUpstreamTimeout,
+} from "../runtime";
 import { estimateTokens, translateRequest, translateResponse, uid } from "../translate";
 import type { AnthropicMessagesRequest, OpenAIChatResponse } from "../types";
+import { startWide, type WideHandle } from "../wide";
 import { BODY_ABORTED, BODY_TOO_LARGE, isBodyError, readBodyLimited } from "./body";
 import { handleStream } from "./stream";
 import { callUpstream, isAbortError } from "./upstream";
 
 const { cyan, green, bold, dim, yellow } = colors;
-
-/** Hard ceiling on max_tokens, independent of what the client asks for. */
-const MAX_OUTPUT_TOKENS = 16384;
 
 /** Sentinel for "the sync body read hit its deadline". */
 const SYNC_BODY_TIMEOUT = Symbol("sync-body-timeout");
@@ -28,6 +36,8 @@ const CLIENT_GONE = () => anthropicError(499, "api_error", "Client disconnected.
 export async function handleMessages(req: Request, config: Config): Promise<Response> {
 	const startTime = performance.now();
 	const requestId = resolveRequestId(req);
+	// Taken here, not at completion: evlog times an event from logger creation.
+	const wide = startWide({ requestId, method: "POST", path: "/v1/messages" });
 	let releaseSlot: (() => void) | undefined;
 	let finishRequest: (() => void) | undefined;
 
@@ -41,6 +51,7 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 
 		const originalModel = body.model || config.defaultModel;
 		const isStream = body.stream === true;
+		wide?.set({ requestModel: originalModel, stream: isStream });
 		finishRequest = beginRequest(isStream);
 		log(
 			`${cyan("→")} ${isStream ? "stream" : "  sync"} ${bold(originalModel)} ${dim(requestId)}`,
@@ -48,11 +59,12 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 		debug("Anthropic request body", body);
 
 		const requestedTarget = resolveTarget(originalModel, body, config);
-		if (!isTargetAllowed(requestedTarget, config)) {
+		const allowlistReason = explainAllowlistRejection(requestedTarget, config);
+		if (allowlistReason) {
 			return anthropicError(
 				400,
 				"invalid_request_error",
-				`Model is not permitted by this free-only proxy: ${displayTarget(requestedTarget)}`,
+				`Model is not permitted: ${displayTarget(requestedTarget)} (${allowlistReason}).`,
 			);
 		}
 
@@ -64,26 +76,24 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 			return anthropicError(
 				400,
 				"invalid_request_error",
-				"No enabled model supports this request's required capabilities.",
+				diagnoseNoCandidates(requestedTarget, body, config, requestApiKey),
 			);
 		}
 		debug(`Upstream candidates: ${targets.map(displayTarget).join(", ")}`);
 
+		// Cache breakpoints are forwarded only when every candidate understands
+		// the field: a marker reaching a gateway that rejects unknown keys would
+		// 400 a turn that otherwise works.
+		const promptCaching = targets.every((candidate) => candidate.provider === "kilo");
 		const translated = translateRequest(
 			body,
 			config.defaultModel,
 			config.reasoningEffort,
+			{ promptCaching },
 		);
 		// MODEL_PREFIX is applied in callUpstream, at the single point where the
 		// upstream model name is finalized, so translateRequest stays prefix-free.
 		translated.model = qualifyModel(requestedTarget, config);
-		if (body.max_tokens != null && body.max_tokens > MAX_OUTPUT_TOKENS) {
-			// Silently truncating is how a client ends up with mysteriously short
-			// answers; say so in the log where the operator will actually see it.
-			log(
-				`${dim("clamped max_tokens")} ${body.max_tokens} → ${MAX_OUTPUT_TOKENS} ${dim(requestId)}`,
-			);
-		}
 		debug("Translated OpenAI body", translated);
 
 		if (req.signal.aborted) return CLIENT_GONE();
@@ -132,6 +142,10 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 			return handleStream(upstream, {
 				model: originalModel,
 				requestId,
+				wide,
+				// Read at completion, so a turn served by a fallback is recorded
+				// against the candidate that actually answered.
+				routedModel: () => displayTarget(activeTarget),
 				startTime,
 				upstreamController: controller,
 				// The slot and the request metric are owned by the pump; the abort
@@ -187,6 +201,7 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 				target: displayTarget(target),
 				timeoutMs: config.upstreamTimeoutMs,
 				runtime,
+				wide,
 			});
 		} finally {
 			detach();
@@ -202,8 +217,11 @@ export async function handleMessages(req: Request, config: Config): Promise<Resp
 /**
  * POST /v1/messages/count_tokens — Claude Code calls this for context
  * accounting. OpenAI-compatible upstreams have no equivalent endpoint, so we
- * return a deterministic character-based estimate (Anthropic's own heuristic
- * is roughly chars/4). The proxy treats it as an estimate only.
+ * return a local heuristic estimate. The body is translated to the same
+ * upstream shape used for real requests and measured with `estimateTokens`,
+ * which applies an attachment budget to images/documents (avoiding raw base64
+ * inflation) — keeping this consistent with the prompt size reported on
+ * streaming message_start. Still an estimate, not a billing figure.
  *
  * Deliberately does NOT take a slot from the upstream RequestLimiter: it
  * performs no upstream work and Claude Code calls it constantly, so sharing
@@ -226,8 +244,9 @@ export async function handleCountTokens(req: Request, config: Config): Promise<R
 		throw err;
 	}
 
+	let parsed: unknown;
 	try {
-		JSON.parse(bodyText);
+		parsed = JSON.parse(bodyText);
 	} catch {
 		return anthropicError(
 			400,
@@ -235,10 +254,20 @@ export async function handleCountTokens(req: Request, config: Config): Promise<R
 			"Request body must be valid JSON.",
 		);
 	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return anthropicError(
+			400,
+			"invalid_request_error",
+			"Request body must be a JSON object.",
+		);
+	}
+	const body = parsed as AnthropicMessagesRequest;
+	if (body.messages !== undefined && !Array.isArray(body.messages)) {
+		return anthropicError(400, "invalid_request_error", "`messages` must be an array.");
+	}
 
-	// Always at least 1: an empty conversation is not a zero-token request, and
-	// Claude Code divides by this figure.
-	const inputTokens = Math.max(1, Math.ceil(bodyText.length / 4));
+	const translated = translateRequest(body, config.defaultModel, config.reasoningEffort);
+	const inputTokens = estimateTokens(translated);
 	return Response.json(
 		{ input_tokens: inputTokens },
 		{ headers: { "Cache-Control": "no-store", "x-request-id": resolveRequestId(req) } },
@@ -321,6 +350,8 @@ interface SyncArgs {
 	timeoutMs: number;
 	/** Shared limiter + cooldown table, so a stalled body can cool the model. */
 	runtime: ReturnType<typeof getRuntime>;
+	/** Wide event for this turn, emitted once on whichever path finishes it. */
+	wide?: WideHandle;
 }
 
 async function handleSync(args: SyncArgs): Promise<Response> {
@@ -333,6 +364,7 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 		target,
 		timeoutMs,
 		runtime,
+		wide,
 	} = args;
 
 	// `fetch` resolved on headers, so nothing bounds the body yet. Without this
@@ -364,9 +396,22 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 			// kilo_proxy_upstream_errors_total rather than looking like success.
 			recordUpstreamError(200);
 			error(`Upstream error: ${redact(msg).slice(0, 200)}`);
-			return anthropicError(502, "api_error", `Upstream error: ${truncate(msg, 2000)}`, {
-				"x-request-id": requestId,
+			wide?.set({
+				routedModel: target,
+				status: 502,
+				outcome: "upstream_error",
+				error: msg,
+				latencyMs: Math.round(performance.now() - startTime),
 			});
+			wide?.emit();
+			return anthropicError(
+				502,
+				"api_error",
+				`Upstream error: ${truncate(redact(msg), 2000)}`,
+				{
+					"x-request-id": requestId,
+				},
+			);
 		}
 
 		const result = translateResponse(parsed, model);
@@ -376,6 +421,16 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 				`in=${result.usage.input_tokens} out=${result.usage.output_tokens} ` +
 				`${dim(`${elapsed}ms`)} ${dim(requestId)}`,
 		);
+		wide?.set({
+			routedModel: target,
+			status: 200,
+			outcome: "complete",
+			stopReason: result.stop_reason,
+			inputTokens: result.usage.input_tokens,
+			outputTokens: result.usage.output_tokens,
+			latencyMs: Number(elapsed),
+		});
+		wide?.emit();
 		return Response.json(result, {
 			headers: {
 				"Content-Type": "application/json",
@@ -388,7 +443,14 @@ async function handleSync(args: SyncArgs): Promise<Response> {
 			// The model stalled mid-body: cool it so the next request prefers a
 			// candidate that is actually answering.
 			runtime.cooldowns.fail(target);
-			recordUpstreamError(504);
+			recordUpstreamTimeout();
+			wide?.set({
+				routedModel: target,
+				status: 504,
+				outcome: "timeout",
+				latencyMs: Math.round(performance.now() - startTime),
+			});
+			wide?.emit();
 			return anthropicError(
 				504,
 				"api_error",
