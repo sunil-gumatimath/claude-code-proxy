@@ -3,7 +3,7 @@
 // ============================================================================
 
 import type { Config } from "../config";
-import { getProvider } from "../providers";
+import { getProvider, parseTarget } from "../providers";
 
 type UpstreamCheck = "ok" | "unauthorized" | "unreachable" | "skipped";
 
@@ -40,8 +40,9 @@ export function resetReadyCacheForTests(): void {
  * and a 401/403 still proves the gateway itself is reachable.
  */
 export async function handleReady(config: Config, now = Date.now()): Promise<Response> {
-	const provider = getProvider(config, "kilo");
-	const key = `${provider.baseUrl}:${Boolean(provider.apiKey)}`;
+	const kilo = getProvider(config, "kilo");
+	const qwen = getProvider(config, "qwen");
+	const key = `${kilo.baseUrl}:${Boolean(kilo.apiKey)}:${qwen.baseUrl}:${Boolean(qwen.apiKey)}:${config.defaultModel}`;
 	if (cache && cache.key === key && now - cache.at < CACHE_MS) {
 		return json(cache.body, cache.code);
 	}
@@ -49,8 +50,8 @@ export async function handleReady(config: Config, now = Date.now()): Promise<Res
 	const body: ReadyBody = {
 		status: "degraded",
 		checks: {
-			kilo_key: Boolean(provider.apiKey),
-			qwen_key: Boolean(config.qwenApiKey),
+			kilo_key: Boolean(kilo.apiKey),
+			qwen_key: Boolean(qwen.apiKey),
 			upstream: "skipped",
 		},
 		model: config.defaultModel,
@@ -63,8 +64,18 @@ export async function handleReady(config: Config, now = Date.now()): Promise<Res
 		return json(body, 503);
 	}
 
-	if (body.checks.kilo_key) {
-		body.checks.upstream = await probe(provider.baseUrl, provider.apiKey);
+	const defaultProvider = parseTarget(config.defaultModel).provider;
+	const providers = defaultProvider === "qwen" ? [qwen, kilo] : [kilo, qwen];
+	const configured = providers.filter((provider) => provider.apiKey);
+	if (configured.length) {
+		const checks = await Promise.all(
+			configured.map((provider) => probe(provider.baseUrl, provider.apiKey)),
+		);
+		body.checks.upstream = checks.includes("ok")
+			? "ok"
+			: checks.includes("unauthorized")
+				? "unauthorized"
+				: "unreachable";
 		if (body.checks.upstream === "ok") body.status = "ready";
 	}
 
