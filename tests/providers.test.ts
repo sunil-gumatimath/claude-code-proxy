@@ -133,6 +133,30 @@ describe("capability lookups", () => {
 		}
 	});
 
+	test("a model that went paid is no longer treated as free", () => {
+		// inkling-2-small left Kilo's $0 tier and now bills per token. It must
+		// not be free, or a fallback could silently spend money.
+		expect(isFreeTarget(kilo("thinkingmachines/inkling-2-small:free"))).toBe(false);
+		expect(getCapabilities(kilo("thinkingmachines/inkling-2-small:free")).free).toBe(
+			false,
+		);
+		expect(freeModelIds()).not.toContain("kilo/thinkingmachines/inkling-2-small:free");
+	});
+
+	test("a model id that is not in the catalog is not allowlisted by default", () => {
+		// nemotron-3.5-lightning-free does not exist in the catalog; the real id
+		// is nemotron-3.5-lightning:free. It is not in CAPABILITIES, so it is
+		// absent from the default allowlist and is blocked by the allowlist gate
+		// (isFreeTarget is deliberately lenient about unknown `-free` ids, but
+		// the allowlist is what actually decides what a request may reach).
+		expect(freeModelIds()).not.toContain("kilo/nvidia/nemotron-3.5-lightning-free");
+		expect(getCapabilities(kilo("nvidia/nemotron-3.5-lightning-free"))).toEqual({
+			tools: false,
+			vision: false,
+			free: false,
+		});
+	});
+
 	test("no qwen model is ever reported free", () => {
 		for (const id of freeModelIds()) expect(id.startsWith("kilo/")).toBe(true);
 	});

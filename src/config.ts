@@ -143,25 +143,28 @@ export interface Config {
  *   primary  Nemotron 3.5 Super VL  1M ctx, 131K out, vision+video, Code #6
  *   1. ERNIE 5.5 Flash        1M ctx, 921K out, the largest free output budget
  *   2. Glyph Cluster          256K ctx, 256K out, stealth coding/reasoning
- *   3. Inkling 2 Small        1.05M ctx, 131K out, text+image reasoning
- *   4. Nemotron 3 Ultra       1M ctx, 65K out, 550B MoE (`opus` alias target)
- *   5. Nemotron 3.5 Lightning 1M ctx, 65K out, fast (`haiku` alias target)
- *   6. North Mini Code        256K ctx, 64K out, code-specialised
- *   7. Dots 3 Note            512K ctx, 460K out, vision
- *   8. Nemotron Nano Omni     256K ctx, 65K out, omni (text/image/audio/video)
- *   9. LFM3 1.7B              262K ctx, 8K out, compact/agent-capable
- *  10. OpenRouter Free        router — resolves server-side
- *  11. Auto Free              router — kept last, resolves to a smaller model
+ *   3. Beam                   1M ctx, 131K out, reflection/agentic
+ *   4. Particle 1             1M ctx, 131K out, agentic coding, vision
+ *   5. Nemotron 3 Ultra       1M ctx, 65K out, 550B MoE (`opus` alias target)
+ *   6. Nemotron 3.5 Lightning 1M ctx, 65K out, fast (`haiku` alias target)
+ *   7. North Mini Code        256K ctx, 64K out, code-specialised
+ *   8. Dots 3 Note            512K ctx, 460K out, vision
+ *   9. Nemotron Nano Omni     256K ctx, 65K out, omni (text/image/audio/video)
+ *  10. LFM3 1.7B              262K ctx, 8K out, compact/agent-capable
+ *  11. OpenRouter Free        router — resolves server-side
+ *  12. Auto Free              router — kept last, resolves to a smaller model
  *
- * The free tier rotates — Beam and Crouton Alpha were retired during 2026-11
- * and this list led with Beam. Re-check GET {KILO_BASE_URL}/models (its
- * `isFree` flag is authoritative) and update the CAPABILITIES table in
- * providers.ts (the default allowlist follows it).
+ * The free tier rotates — Inkling 2 Small went paid during 2026-11 (it now
+ * bills per token, so it is deliberately absent here), and Beam returned to the
+ * $0 tier. Re-check GET {KILO_BASE_URL}/models (its `isFree` flag is
+ * authoritative) and update the CAPABILITIES table in providers.ts (the
+ * default allowlist follows it).
  */
 const DEFAULT_FALLBACK_MODELS = [
 	"kilo/baidu/ernie-5.5-flash-preview:free",
 	"kilo/stealth/glyph-cluster",
-	"kilo/thinkingmachines/inkling-2-small:free",
+	"kilo/reflection/beam-free",
+	"kilo/particle-ai/particle-1:free",
 	"kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
 	"kilo/nvidia/nemotron-3.5-lightning:free",
 	"kilo/cohere/north-mini-code:free",

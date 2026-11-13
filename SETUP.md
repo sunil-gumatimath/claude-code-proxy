@@ -93,7 +93,7 @@ subset.
 | `KILO_BASE_URL` | Kilo gateway URL | Other OpenAI-compatible APIs |
 | `MODEL_PREFIX` | *(empty)* | Add only when your gateway requires a model prefix |
 | `DEFAULT_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Pick a different primary model |
-| `FALLBACK_MODELS` | the other free models, strongest first (11 models) | Control fallback order after upstream failures; the primary is not repeated |
+| `FALLBACK_MODELS` | the other free models, strongest first (12 models) | Control fallback order after upstream failures; the primary is not repeated |
 | `ALLOWED_MODELS` | every free Kilo model | Narrow the approval list, or opt in a paid model |
 | `FREE_MODELS_ONLY` | `true` | Set `false` to allow paid models that are allowlisted |
 | `VISION_MODEL` | `kilo/nvidia/nemotron-3.5-super-vl:free` | Your primary cannot read images — or you want the video-capable model for image turns |
@@ -103,7 +103,7 @@ subset.
 | `MAX_QUEUED_REQUESTS` | `20` | Set `0` to fail fast with `429` instead of queueing |
 | `MODEL_COOLDOWN_MS` | `30000` | How long a failing model is skipped |
 | `MAX_BODY_BYTES` | `20971520` | Raise for very large images or file attachments |
-| `MODEL_ALIASES` | haiku → Nemotron Lightning, sonnet/opus → Reflection Beam | Route bare `claude-*` names yourself |
+| `MODEL_ALIASES` | haiku → Nemotron Lightning, sonnet → Nemotron 3.5 Super VL, opus → Nemotron Ultra | Route bare `claude-*` names yourself |
 | `SMART_ROUTING` | `true` | Set `false` to disable alias and vision rerouting entirely |
 | `UPSTREAM_CA_FILE` | *(empty)* | Corporate HTTPS inspection (preferred over disabling verification) |
 | `CORS_ALLOWED_ORIGINS` | *(empty)* | Only if a browser calls the proxy; Claude Code does not |
@@ -269,7 +269,7 @@ profile. Create `~/.claude/settings.json` if it does not exist:
 | Key | Why |
 |-----|-----|
 | `ANTHROPIC_MODEL` | Must be provider-qualified (`kilo/…` or `qwen/…`) or a `claude-*` name the alias table can route |
-| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Nemotron 3.5 Super VL, Inkling 2 Small, Nemotron Ultra and Nemotron Lightning are `1048576`; ERNIE 5.5 Flash is `1024000`; Dots 3 Note is `512000`; LFM3 1.7B is `262144`; Glyph Cluster/North Mini Code are `256000` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | The model's real window. Without it Claude Code assumes 200K for unrecognized ids and auto-compacts early. Nemotron 3.5 Super VL, Beam, Particle 1, Nemotron Ultra and Nemotron Lightning are `1048576`; ERNIE 5.5 Flash is `1024000`; Dots 3 Note is `512000`; LFM3 1.7B is `262144`; Glyph Cluster/North Mini Code are `256000` |
 | `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | The output ceiling of your model: `131072` for Nemotron 3.5 Super VL, `65536` for Ultra/Lightning, `921600` for ERNIE 5.5 Flash, `16384` for a model the catalog does not describe |
 | `ANTHROPIC_API_KEY` | Set to `""` if present, so Claude Code cannot call real Anthropic |
 

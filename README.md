@@ -105,11 +105,12 @@ the $0 tier. It is already multimodal (text, image, *and video*), so
 rest of the free tier in ranked order, so a fallback only runs when the primary
 actually failed — **ERNIE 5.5 Flash** (1M ctx, **921K out**, the
 largest output budget on the free tier), **Glyph Cluster** (stealth reasoning
-model for coding and long-context analysis, 256K in/out), **Inkling 2 Small**
-(1.05M ctx, text+image, 131K out), Nemotron Ultra (1M, 550B MoE), Nemotron
-Lightning (fast), North Mini Code (code-specialised), Dots 3 Note (vision,
-460K out), Nemotron Nano Omni (omni), LFM3 1.7B (compact), OpenRouter Free, and
-finally `kilo/kilo-auto/free` — Kilo's own free router, kept last because it
+model for coding and long-context analysis, 256K in/out), **Beam** (1M ctx,
+131K out, reflection/agentic), **Particle 1** (1.05M ctx, agentic coding,
+vision, 131K out), Nemotron Ultra (1M, 550B MoE), Nemotron Lightning (fast),
+North Mini Code (code-specialised), Dots 3 Note (vision, 460K out), Nemotron
+Nano Omni (omni), LFM3 1.7B (compact), OpenRouter Free, and finally
+`kilo/kilo-auto/free` — Kilo's own free router, kept last because it
 resolves server-side. Every entry in the default chain supports tool calling,
 and the head of the list has the biggest context/output budgets because Claude
 Code sends large prompts and large file rewrites.
@@ -123,18 +124,19 @@ effort from Claude Code's thinking budget instead.
 
 ### Current free models
 
-Verified against the live Kilo catalog on **2026-11-11** — every model below
+Verified against the live Kilo catalog on **2026-11-13** — every model below
 carries the gateway's own `isFree: true` flag and bills `$0` at check time.
-Kilo's $0 tier rotates (Beam and Crouton Alpha were both retired during
-2026-11), and some stealth/alpha models can change terms, so re-check when a
-model 404s or 429s.
+Kilo's $0 tier rotates (Inkling 2 Small went paid during 2026-11; Beam
+returned to the tier), and some stealth/alpha models can change terms, so
+re-check when a model 404s or 429s.
 
 | Model | Context | Input | Tools | Role |
 | --- | --- | --- | --- | --- |
 | `kilo/nvidia/nemotron-3.5-super-vl:free` | 1M | text, image, video | ✓ | **default primary + vision** — Code agent #6 on Kilo's leaderboard, 131K output |
 | `kilo/baidu/ernie-5.5-flash-preview:free` | 1M | text | ✓ | **largest output on the free tier** — 921K, coding/agentic |
 | `kilo/stealth/glyph-cluster` | 256K | text | ✓ | stealth reasoning model for coding + long-context analysis, 256K output |
-| `kilo/thinkingmachines/inkling-2-small:free` | 1.05M | text, image | ✓ | 594B MoE (17B active), multimodal reasoning, 131K output |
+| `kilo/reflection/beam-free` | 1M | text | ✓ | reflection/agentic, 131K output |
+| `kilo/particle-ai/particle-1:free` | 1.05M | text, image | ✓ | agentic coding (post-trained on DeepSeek V4.1 Flash), 131K output |
 | `kilo/nvidia/nemotron-3-ultra-550b-a55b:free` | 1M | text | ✓ | 550B MoE (55B active), orchestration — the `opus` alias target |
 | `kilo/nvidia/nemotron-3.5-lightning:free` | 1M | text | ✓ | fast — the `haiku` alias target |
 | `kilo/cohere/north-mini-code:free` | 256K | text | ✓ | code-specialised |
@@ -191,7 +193,7 @@ Notes:
 - `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the model's real window so
   auto-compact doesn't assume 200K for unrecognized model IDs — set it to the
   context size of whichever model you actually run (1048576 for Nemotron 3.5
-  Super VL, Inkling 2 Small, Nemotron Ultra, or Nemotron Lightning; 1024000 for
+  Super VL, Beam, Particle 1, Nemotron Ultra, or Nemotron Lightning; 1024000 for
   ERNIE 5.5 Flash; 512000 for Dots 3 Note; 262144 for LFM3 1.7B; 256000 for
   Glyph Cluster or North Mini Code).
 - `CLAUDE_CODE_MAX_OUTPUT_TOKENS` should match the output ceiling of the model
@@ -234,7 +236,7 @@ that; it documents each one inline.
 | `QWEN_API_KEY` | unset | QwenCloud/DashScope key (`DASHSCOPE_API_KEY` is an accepted alias) |
 | `QWEN_BASE_URL` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_BASE_URL` is an accepted alias |
 | `MODEL_PREFIX` | *(empty)* | Prefix applied to Kilo model names, e.g. `anthropic/`. Never applied to Qwen |
-| `UPSTREAM_TIMEOUT_MS` | `120000` | Header timeout **and** per-read deadline on both response paths (see below) |
+| `UPSTREAM_TIMEOUT_MS` | `120000` | Header timeout **and** per-read deadline on both response paths (see below). For slow reasoning models, `2100000` gives a 35-minute window |
 | `UPSTREAM_TLS_REJECT_UNAUTHORIZED` | `true` | Verify upstream certificates. Prefer `UPSTREAM_CA_FILE` over disabling |
 | `UPSTREAM_CA_FILE` | *(empty)* | PEM file for a corporate/HTTPS-inspection root CA |
 
@@ -365,7 +367,7 @@ are not wired here; `src/wide.ts` is the single place to add one.
 | `POST /v1/messages` | Anthropic Messages — streaming and sync |
 | `POST /v1/messages/count_tokens` | Local token estimate (`chars/4`, minimum 1). Never touches upstream, so it is never capacity-limited |
 | `GET /health`, `/healthz` | Liveness only: `{"status":"ok"}` |
-| `GET /ready` | Readiness: a provider key is configured and the gateway answers (`ok` / `unauthorized` / `unreachable`). Returns `503` when a turn cannot succeed |
+| `GET /ready` | Readiness: at least one configured upstream answers (`ok` / `unauthorized` / `unreachable`). Probes the default model's provider first and returns `503` when no configured provider is reachable |
 | `GET /` | Liveness plus proxy version, upstream target, and uptime |
 | `GET /version` | Name and version |
 | `GET /v1/models` | Allowlisted + fallback + alias ids, each with `context_length`, `max_output_tokens`, `supports_tools`, `supports_vision`, `free` |
@@ -446,9 +448,35 @@ reject on the next turn.
 
 ## Development
 
+## End-to-end smoke check
+
+After configuring `.env` and starting the proxy, verify the HTTP surface and
+exercise a real Anthropic-compatible request. These commands use PowerShell;
+replace the model with one present in your `ALLOWED_MODELS` list. If
+`PROXY_API_KEY` is set, use it as `ANTHROPIC_AUTH_TOKEN`; otherwise use a
+provider key accepted by the configured upstream.
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "http://127.0.0.1:4181"
+$env:ANTHROPIC_AUTH_TOKEN = "local-proxy"
+$env:ANTHROPIC_MODEL = "kilo/nvidia/nemotron-3.5-super-vl:free"
+claude --model $env:ANTHROPIC_MODEL -p "Reply with exactly: smoke-ok"
+```
+
+For interactive coverage, use Claude Code to perform these checks in a
+disposable project: ask it to edit two files (tool calls and multi-turn tool
+results), request an image description with an image attached (vision), and
+confirm output appears incrementally (streaming). Check `GET /health` for
+liveness and `GET /ready` for an upstream readiness probe. Inspect `/metrics`
+or enable `EVLOG_DRAIN=file` to review request outcomes and token/latency data.
+This is a manual integration check; the repository tests cover the translation
+and runtime components separately.
+
+## Development
+
 ```bash
 curl http://127.0.0.1:4181/health
-bun test          # 283 unit + integration tests
+bun test          # 316 unit + integration tests
 bun run typecheck # tsc --noEmit
 bun run dev       # --watch reload
 bun run check     # format + lint + typecheck + test, as CI runs it

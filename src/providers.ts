@@ -135,7 +135,30 @@ const CAPABILITIES: Record<string, ModelCapabilities> = {
 		contextLength: 1_024_000,
 		maxOutput: 921_600,
 	},
+	// inkling-2-small was on the $0 tier when the catalog was first verified
+	// (2026-11-11), but the live catalog now prices it
+	// ($0.00000015 / $0.0000005 per token, isFree=false). It is kept here with
+	// `free: false` so the cost gate rejects it even if an operator still has it
+	// in an explicit ALLOWED_MODELS — deleting the entry would let the `-free`
+	// suffix heuristic call it free again. Re-mark `free: true` only if the
+	// gateway returns it to the $0 tier.
 	"kilo/thinkingmachines/inkling-2-small:free": {
+		tools: true,
+		vision: true,
+		free: false,
+		contextLength: 1_048_576,
+		maxOutput: 131_072,
+	},
+	"kilo/reflection/beam-free": {
+		tools: true,
+		vision: false,
+		free: true,
+		contextLength: 1_048_576,
+		maxOutput: 131_072,
+	},
+
+	// Particle AI — token-efficient agentic coding model, newly on the $0 tier.
+	"kilo/particle-ai/particle-1:free": {
 		tools: true,
 		vision: true,
 		free: true,
