@@ -307,6 +307,32 @@ describe("translateRequest", () => {
 		expect(out.messages[0].content as string).toContain("Hello from doc");
 	});
 
+	test("flattens a document content-array source instead of stringifying it", () => {
+		// Anthropic's `content` document source is an array of blocks. Before the
+		// fix it was concatenated as a string, producing "[object Object]".
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "user",
+					content: [
+						{
+							type: "document",
+							source: {
+								type: "content",
+								content: [
+									{ type: "text", text: "doc body" },
+									{ type: "text", text: "second part" },
+								],
+							},
+						},
+					] as any,
+				},
+			],
+		});
+		expect(out.messages[0].content as string).toBe("[Document]\ndoc body\nsecond part");
+	});
+
 	test("forwards stop_sequences and top_p", () => {
 		const out = translateRequest({
 			model: "m",
@@ -384,6 +410,66 @@ describe("translateRequest", () => {
 			content: "captured",
 		});
 		expect(out.messages[2]).toEqual({
+			role: "user",
+			content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }],
+		});
+	});
+
+	test("two tool results in one message keep their tool messages contiguous", () => {
+		// The second tool_result carries an image. Before the fix the image was
+		// emitted immediately after its tool message, interleaving a `user`
+		// message between two `tool` messages and desyncing the tool_call_id
+		// pairing a strict gateway rejects.
+		const out = translateRequest({
+			model: "m",
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "tool_use", id: "call_1", name: "shot", input: {} },
+						{ type: "tool_use", id: "call_2", name: "read", input: {} },
+					],
+				},
+				{
+					role: "user",
+					content: [
+						{
+							type: "tool_result",
+							tool_use_id: "call_1",
+							content: [
+								{ type: "text", text: "img" },
+								{
+									type: "image",
+									source: {
+										type: "base64",
+										media_type: "image/png",
+										data: "QUJD",
+									},
+								},
+							],
+						},
+						{ type: "tool_result", tool_use_id: "call_2", content: "file body" },
+					],
+				},
+			],
+		});
+		expect(out.messages.map((m) => m.role)).toEqual([
+			"assistant",
+			"tool",
+			"tool",
+			"user",
+		]);
+		expect(out.messages[1]).toEqual({
+			role: "tool",
+			tool_call_id: "call_1",
+			content: "img",
+		});
+		expect(out.messages[2]).toEqual({
+			role: "tool",
+			tool_call_id: "call_2",
+			content: "file body",
+		});
+		expect(out.messages[3]).toEqual({
 			role: "user",
 			content: [{ type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } }],
 		});
@@ -507,6 +593,49 @@ describe("translateResponse", () => {
 		expect((out.content[0] as { signature: string }).signature.length).toBeGreaterThan(0);
 		expect(out.content[1]).toEqual({ type: "text", text: "Here's my answer" });
 		expect(out.stop_reason).toBe("end_turn");
+	});
+
+	test("flattens an array content part instead of stringifying it", () => {
+		// A non-streaming response can carry content as an array of parts. Before
+		// the fix, String([...]) produced "[object Object]" for the client.
+		const out = translateResponse(
+			{
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: [
+								{ type: "text", text: "part one" },
+								{ type: "text", text: "part two" },
+							],
+						},
+						finish_reason: "stop",
+					},
+				],
+			},
+			"m",
+		);
+		expect(out.content[0]).toEqual({ type: "text", text: "part one\npart two" });
+	});
+
+	test("array content parts that are not text do not become garbage", () => {
+		// A tool-result-style part (or a non-text object) in an array content
+		// must not stringify to "[object Object]" inside the text block.
+		const out = translateResponse(
+			{
+				choices: [
+					{
+						message: {
+							role: "assistant",
+							content: [{ type: "tool_result", tool_use_id: "x", content: "y" }],
+						},
+						finish_reason: "stop",
+					},
+				],
+			},
+			"m",
+		);
+		expect(out.content[0]).toEqual({ type: "text", text: "" });
 	});
 
 	test("thinking signature is stable for identical reasoning text", () => {
@@ -916,6 +1045,79 @@ describe("StreamTranslator", () => {
 		expect(joined).toContain('"tool_use"');
 		expect(joined).toContain("fn1");
 		expect(joined).toContain("fn2");
+	});
+
+	test("index-less tool calls in one chunk stay distinct blocks", () => {
+		// A gateway that omits `index` would collapse both calls onto key 0,
+		// merging their names and arguments into one block. Each index-less call
+		// gets its own synthetic key, so the client sees two tool_use blocks.
+		const t = new StreamTranslator("m");
+		const events = t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									id: "call_a",
+									type: "function",
+									function: { name: "Read", arguments: '{"p":' },
+								},
+								{
+									id: "call_b",
+									type: "function",
+									function: { name: "Grep", arguments: '{"q":' },
+								},
+							],
+						},
+					},
+				],
+			}),
+		);
+		const joined = events.join("");
+		// Two distinct blocks, one per call. Count the event lines, not the
+		// payload string, which also contains the "content_block_start" literal.
+		const starts = joined.match(/event: content_block_start/g);
+		expect(starts?.length).toBe(2);
+		expect(joined).toContain('"name":"Read"');
+		expect(joined).toContain('"name":"Grep"');
+		// Each block's own arguments, not both merged into one.
+		const deltas = joined.match(/input_json_delta/g);
+		expect(deltas?.length).toBe(2);
+	});
+
+	test("an index-less tool call streamed across chunks stays one block", () => {
+		// Arguments arrive before the id in one chunk, then the id/name in the
+		// next. Without index-based identity the second chunk would open a new
+		// block, leaving a dangling tool call.
+		const t = new StreamTranslator("m");
+		const e1 = t.processChunk(
+			JSON.stringify({
+				choices: [{ delta: { tool_calls: [{ function: { arguments: '{"a":' } }] } }],
+			}),
+		);
+		const e2 = t.processChunk(
+			JSON.stringify({
+				choices: [
+					{
+						delta: {
+							tool_calls: [
+								{
+									id: "call_x",
+									type: "function",
+									function: { name: "fn", arguments: "1}" },
+								},
+							],
+						},
+					},
+				],
+			}),
+		);
+		const joined = [...e1, ...e2, ...t.finalize()].join("");
+		const starts = joined.match(/event: content_block_start/g);
+		expect(starts?.length).toBe(1);
+		expect(joined).toContain('"id":"call_x"');
+		expect(joined).toContain('"name":"fn"');
 	});
 
 	test("usage stats propagate through stream (output only per spec)", () => {

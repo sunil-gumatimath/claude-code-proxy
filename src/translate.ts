@@ -263,6 +263,21 @@ function translateAssistantMessage(
 function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] {
 	const result: OpenAIMessage[] = [];
 	const contentParts: unknown[] = [];
+	/**
+	 * Images a tool_result returned. OpenAI `tool` messages are text-only, so an
+	 * image cannot ride along with its tool message — but every `tool` message
+	 * must also stay contiguous with the assistant message's `tool_calls`. Emit
+	 * the images as one `user` message only after all `tool` messages, so two
+	 * tool results in one message (the second carrying an image) do not
+	 * interleave a `user` message between two `tool` messages, which would
+	 * desync the `tool_call_id` pairing and be rejected by a strict gateway.
+	 */
+	let pendingToolImages: unknown[] = [];
+	const flushToolImages = () => {
+		if (!pendingToolImages.length) return;
+		result.push({ role: "user", content: pendingToolImages });
+		pendingToolImages = [];
+	};
 
 	for (const block of blocks) {
 		if (block.type === "text" && "text" in block) {
@@ -275,9 +290,23 @@ function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] 
 				type?: string;
 				media_type?: string;
 				data?: string;
-				content?: string;
+				content?: string | Array<{ type?: string; text?: unknown }>;
 			};
-			const text = source?.content || (source?.type === "text" ? source.data : undefined);
+			// A document source is either a plain string (`type: "text"`) or a
+			// list of content blocks (`type: "content"`). Only the former was
+			// handled, so an array source stringified to "[object Object]".
+			let text: string | undefined;
+			if (typeof source?.content === "string") {
+				text = source.content;
+			} else if (Array.isArray(source?.content)) {
+				text = source.content
+					.filter((part) => part && typeof part === "object" && part.type === "text")
+					.map((part) => String((part as { text?: unknown }).text ?? ""))
+					.filter(Boolean)
+					.join("\n");
+			} else if (source?.type === "text" && typeof source.data === "string") {
+				text = source.data;
+			}
 			if (text) {
 				contentParts.push({ type: "text", text: `[Document]\n${text}` });
 			} else if (source?.data && source?.media_type) {
@@ -335,11 +364,16 @@ function translateUserMessage(blocks: AnthropicContentBlock[]): OpenAIMessage[] 
 			});
 
 			// An OpenAI tool message is text-only, so an image a tool returned
-			// cannot ride along with it. Emit it as the immediately following user
-			// message; silently dropping it leaves the model blind to the output.
-			if (toolImages.length) result.push({ role: "user", content: toolImages });
+			// cannot ride along with it. Buffer it so all tool messages stay
+			// contiguous, then emit the images as one following user message;
+			// silently dropping them leaves the model blind to the output.
+			pendingToolImages.push(...toolImages);
 		}
 	}
+
+	// Flush tool-result images after every tool message in this block, so a
+	// `user` image message never lands between two `tool` messages.
+	flushToolImages();
 
 	if (contentParts.length) {
 		result.push({ role: "user", content: simplifyContent(contentParts) });
@@ -400,8 +434,28 @@ export function translateResponse(
 
 	const content: AnthropicContentBlock[] = [];
 
-	if (choice.message?.content) {
-		content.push({ type: "text", text: String(choice.message.content) });
+	const responseContent = choice.message?.content;
+	if (responseContent) {
+		// A non-streaming response can carry content as a string *or* as an
+		// array of parts. Stringifying an array yields "[object Object]"; flatten
+		// text parts instead, so the client gets real text rather than a garbage
+		// string (and a thinking block can still be unshifted in front).
+		const text =
+			typeof responseContent === "string"
+				? responseContent
+				: Array.isArray(responseContent)
+					? responseContent
+							.map((part) =>
+								part &&
+								typeof part === "object" &&
+								(part as { type?: string }).type === "text"
+									? String((part as { text?: unknown }).text ?? "")
+									: "",
+							)
+							.filter(Boolean)
+							.join("\n")
+					: String(responseContent);
+		content.push({ type: "text", text });
 	}
 
 	if (choice.message?.reasoning_content) {
@@ -481,6 +535,16 @@ export class StreamTranslator {
 			started: boolean;
 		}
 	>();
+	/**
+	 * Synthetic key for a tool_call delta that omitted its `index`. Real OpenAI
+	 * indexes are non-negative, so these are negative and can never collide with
+	 * a wire index, or with each other across chunks of the same turn.
+	 */
+	private nextSyntheticToolIdx = -1;
+	/** The synthetic key most recently written, so an index-less call can resume. */
+	private openSyntheticToolIdx: number | undefined;
+	/** tool_call id → synthetic key, so a resumed call maps to its own block. */
+	private idToSynthetic = new Map<string, number>();
 	private inputTokens = 0;
 	private outputTokens = 0;
 	private finished = false;
@@ -675,7 +739,39 @@ export class StreamTranslator {
 			}
 
 			for (const tc of delta.tool_calls) {
-				const tcIdx = tc.index ?? 0;
+				// Real OpenAI streaming indexes are non-negative. A gateway that
+				// omits `index` entirely would otherwise collapse every call onto
+				// key 0, merging distinct tool calls into one block. Index-less
+				// calls get their own negative keys, resolved so a single call
+				// streamed across chunks stays one block while two distinct calls
+				// stay two. (A no-index stream that interleaves an id-less call
+				// with a new call is inherently ambiguous; the heuristic prefers
+				// continuation, which matches the common "args before id" shape.)
+				let tcIdx: number;
+				if (tc.index == null) {
+					const open = this.openSyntheticToolIdx;
+					const openEntry = open == null ? undefined : this.toolMap.get(open);
+					if (tc.id) {
+						const byId = this.idToSynthetic.get(tc.id);
+						if (byId != null) {
+							tcIdx = byId;
+						} else if (openEntry && !openEntry.id) {
+							// An id arriving completes the still-unnamed open call.
+							// `openEntry` is only truthy when `open` is non-null.
+							tcIdx = open!;
+							this.idToSynthetic.set(tc.id, tcIdx);
+						} else {
+							tcIdx = this.nextSyntheticToolIdx--;
+							this.idToSynthetic.set(tc.id, tcIdx);
+						}
+					} else {
+						// No id: continue the most recent index-less call, or open one.
+						tcIdx = open ?? this.nextSyntheticToolIdx--;
+					}
+					this.openSyntheticToolIdx = tcIdx;
+				} else {
+					tcIdx = tc.index;
+				}
 				let entry = this.toolMap.get(tcIdx);
 
 				// Open the Anthropic block only after we know its immutable metadata.
